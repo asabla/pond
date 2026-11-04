@@ -4,6 +4,11 @@ A local data lake per directory. Run `pond` in a folder and you get a [MiniLake]
 
 Use it to try out Databricks-style catalogs, Delta tables, SQL and PySpark jobs on your own machine, with each project's data kept separate and next to the project.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/graph-dark.png">
+  <img alt="The Graph tab showing the example messaging network: 300 people coloured by team in six clusters, sized by betweenness, with graph statistics in the side panel" src="docs/images/graph-light.png">
+</picture>
+
 ## Requirements
 
 - Go 1.25 or later, to build pond.
@@ -118,6 +123,8 @@ Seeding stops at the first failure and prints the error, including the end of a 
 pond examples/social
 ```
 
+![Terminal output of pond up seeding the example, and pond ls listing the running context](docs/images/cli.png)
+
 In the **Data** tab, open `demo.social.messages`, choose **Open as graph**, and pick `demo.social.people` as the node table with `name` as the label.
 
 ## Snapshots
@@ -144,6 +151,11 @@ Pond prints a warning and the URLs others can use. Anyone who can reach the port
 | **Jobs** | Write and run Python/PySpark scripts once, or save them as jobs and run them again. Runs show status, duration and output. |
 | **Files** | Browse the lake's files (DBFS and `/Volumes`): upload by drag and drop, create folders, download, delete, preview data files as tables, query a file in place or turn it into a table. Browse and edit workspace scripts, and run them. |
 | **Admin** | Context details, SQL warehouses, secret scopes and keys, MiniLake's services, and resetting this context's lake. |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/query-dark.png">
+  <img alt="The Query tab with a saved SQL query joining the example tables, and its results grid" src="docs/images/query-light.png">
+</picture>
 
 Destructive actions (dropping, deleting folders, resetting) ask for confirmation. When a lot is at stake, you confirm by typing the object's name. If MiniLake stops responding, the page says so and reconnects by itself.
 
@@ -229,6 +241,7 @@ web/static/                  UI: plain HTML/CSS/JS modules, no build step
   webmcp.js                  WebMCP tool definitions
 web/test/                    UI unit tests (node --test, no dependencies)
 examples/social/             seed scripts for a generated example network
+docs/images/                 README screenshots, taken from the example
 ```
 
 ## License
