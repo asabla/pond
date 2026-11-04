@@ -1,3 +1,3 @@
-module pond
+module github.com/asabla/pond
 
 go 1.25

@@ -20,10 +20,10 @@ import (
 	"strings"
 	"syscall"
 
-	"pond/internal/lake"
-	"pond/internal/pondctx"
-	"pond/internal/server"
-	"pond/web"
+	"github.com/asabla/pond/internal/lake"
+	"github.com/asabla/pond/internal/pondctx"
+	"github.com/asabla/pond/internal/server"
+	"github.com/asabla/pond/web"
 )
 
 // Set at build time: -ldflags "-X main.version=1.2.3".

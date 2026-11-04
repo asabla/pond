@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"pond/internal/lake"
+	"github.com/asabla/pond/internal/lake"
 )
 
 var proxyPrefixes = []string{"/api/", "/_minilake/", "/mcp"}

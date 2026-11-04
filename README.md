@@ -13,15 +13,14 @@ Pond is a single binary with the UI embedded. It has no other dependencies.
 
 ## Install
 
-From a checkout:
-
 ```sh
-go install .        # installs `pond` into $(go env GOPATH)/bin
+go install github.com/asabla/pond@latest   # installs `pond` into $(go env GOPATH)/bin
 ```
 
-Or build a binary in place:
+Or build from a checkout:
 
 ```sh
+git clone https://github.com/asabla/pond && cd pond
 go build -o pond .
 ```
 

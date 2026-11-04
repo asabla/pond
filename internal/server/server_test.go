@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"pond/internal/lake"
-	"pond/web"
+	"github.com/asabla/pond/internal/lake"
+	"github.com/asabla/pond/web"
 )
 
 // fakeMiniLake is just enough of MiniLake for Pond's own calls and the proxy.
