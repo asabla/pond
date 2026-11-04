@@ -641,6 +641,9 @@ func importSnapshot(a *args) error {
 	return nil
 }
 
+// downTimeout bounds how long down waits for a running pond to stop.
+const downTimeout = time.Minute
+
 func down(a *args) error {
 	c := pondctx.ForDir(a.dir)
 	if info := pondctx.Serving(c); info != nil {
@@ -655,7 +658,16 @@ func down(a *args) error {
 		if err != nil {
 			return err
 		}
-		logf("Asked pond (pid %d) to stop %s.", info.PID, c.Name())
+		// Wait for the lock, so a command run straight after (reset, import, up)
+		// doesn't find the context half shut down.
+		logf("Stopping %s (pid %d)…", c.Name(), info.PID)
+		for deadline := time.Now().Add(downTimeout); pondctx.Serving(c) != nil; {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("%s is still stopping after %s; check pid %d", c.Name(), downTimeout, info.PID)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		logf("Stopped %s.", c.Name())
 		return nil
 	}
 	pondctx.Stop(c)

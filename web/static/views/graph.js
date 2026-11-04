@@ -303,7 +303,8 @@ export function createGraphView(ui) {
       directed: g.type === "directed",
       weighted: weighted(),
       density: lib.metrics.graph.density(g),
-      average_degree: g.order ? (g.type === "directed" ? g.size : 2 * g.size) / g.order : 0,
+      // Matches the Degree metric, which counts in- and out-edges.
+      average_degree: g.order ? (2 * g.size) / g.order : 0,
       components: comp.meta.count,
       largest_component: comp.meta.largest,
       mode: s.mode,
@@ -363,6 +364,7 @@ export function createGraphView(ui) {
     }
     s.panel = "path";
     refresh();
+    if (keys) fitNodes(keys);
     renderToolbar();
     renderPanel();
     return s.path;
@@ -543,6 +545,17 @@ export function createGraphView(ui) {
     if (d) s.sigma.getCamera().animate({ x: d.x, y: d.y, ratio: 0.35 }, { duration: 500 });
   }
 
+  // Moves the camera so all the given nodes are in view (ratio 1 shows the whole graph).
+  function fitNodes(keys) {
+    const pts = keys.map((k) => s.sigma?.getNodeDisplayData(k)).filter(Boolean);
+    if (!pts.length) return;
+    const xs = pts.map((d) => d.x);
+    const ys = pts.map((d) => d.y);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const ratio = Math.min(1, Math.max(0.2, Math.max(x1 - x0, y1 - y0) * 1.4));
+    s.sigma.getCamera().animate({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, ratio }, { duration: 500 });
+  }
+
   function select(key, { center = false } = {}) {
     s.selected = key && s.graph?.hasNode(key) ? key : null;
     if (s.selected) {
@@ -693,7 +706,7 @@ export function createGraphView(ui) {
       const st = await stats();
       const rows = [
         ["Nodes", st.nodes], ["Edges", st.edges], ["Directed", st.directed ? "yes" : "no"], ["Weighted", st.weighted ? "yes" : "no"],
-        ["Density", st.density], ["Average degree", st.average_degree], ["Connected components", st.components], ["Largest component", st.largest_component],
+        ["Density", st.density], ["Average degree", st.average_degree], [st.directed ? "Weakly connected components" : "Connected components", st.components], ["Largest component", st.largest_component],
         st.strong_components != null && ["Strongly connected components", st.strong_components],
         st.communities != null && ["Communities", st.communities], st.modularity != null && ["Modularity", st.modularity],
         st.average_clustering != null && ["Average clustering", st.average_clustering],
@@ -708,7 +721,11 @@ export function createGraphView(ui) {
           s.diameter == null && h("button", { class: "btn", title: "Longest shortest path; slow on big graphs", onclick: async () => {
             if (s.graph.order > HEAVY_NODES && !(await confirmDialog({ title: "Compute the diameter?", body: `It takes a while on ${s.graph.order.toLocaleString()} nodes.`, confirm: "Compute" }))) return;
             const { lib } = await loadLibs();
-            await busy(async () => (s.diameter = lib.metrics.graph.diameter(s.graph)));
+            await busy(async () => {
+              // graphology returns Infinity when some node can't reach another (following edge direction).
+              const d = lib.metrics.graph.diameter(s.graph);
+              s.diameter = Number.isFinite(d) ? d : "infinite: some nodes can't reach others";
+            });
             renderPanel();
           } }, "Diameter")),
         s.mode === "overview" && h("p", { class: "help" }, "These describe the loaded nodes, not the whole graph."));
@@ -741,7 +758,7 @@ export function createGraphView(ui) {
         h("button", { class: "btn", onclick: () => ((pathForm.to = a.label), (s.panel = "path"), renderPanel()) }, "Path to here"),
         h("button", { class: "btn ghost", onclick: () => ui.views.query.open(G.neighborsSql(s.def, s.columns, a.raw, 1000)) }, "Edges in SQL")),
       g.type === "directed"
-        ? [nbrList("Follows", g.outNeighbors(key)), nbrList("Followed by", g.inNeighbors(key))]
+        ? [nbrList("Outgoing", g.outNeighbors(key)), nbrList("Incoming", g.inNeighbors(key))]
         : nbrList("Neighbours", g.neighbors(key)));
   }
 
