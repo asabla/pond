@@ -110,6 +110,16 @@ CREATE OR REPLACE TABLE shop.raw.customers AS
 
 Seeding stops at the first failure and prints the error, including the end of a failed Python run's output. Fix the script, then run `pond seed` to run all the scripts again, or `pond reset` to start from an empty lake. Scripts that use `IF NOT EXISTS` or `CREATE OR REPLACE` can safely run more than once.
 
+### Example
+
+[`examples/social`](examples/social/pond-seed) generates a small company messaging network: 300 people in six teams (`demo.social.people`) and 2,302 sender → recipient edges weighted by message count (`demo.social.messages`). Most messages stay within a team, and a few connectors message across teams. To explore it:
+
+```sh
+pond examples/social
+```
+
+In the **Data** tab, open `demo.social.messages`, choose **Open as graph**, and pick `demo.social.people` as the node table with `name` as the label.
+
 ## Snapshots
 
 `pond export` writes a stopped context's lake data to a `.tar.gz` file, and `pond import` loads one into a stopped context, replacing its data. Use them to back up a lake or hand it to someone else. Snapshots leave out MiniLake's download caches. If a snapshot is damaged or contains paths outside the lake, `import` refuses it and leaves the existing data unchanged.
@@ -218,6 +228,7 @@ web/static/                  UI: plain HTML/CSS/JS modules, no build step
   vendor/                    sigma.js and graphology browser builds, with their licences
   webmcp.js                  WebMCP tool definitions
 web/test/                    UI unit tests (node --test, no dependencies)
+examples/social/             seed scripts for a generated example network
 ```
 
 ## License
