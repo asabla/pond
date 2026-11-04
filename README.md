@@ -46,23 +46,31 @@ Open the UI URL in a browser, or run the printed `claude mcp add` command to giv
 ## Usage
 
 ```sh
-pond [up] [DIR] [flags]   # start the context for DIR (default: current directory)
-pond ls                   # list running contexts across directories
-pond down [DIR]           # stop a context and remove its containers (keeps data)
-pond version              # print the version
+pond [up] [DIR] [flags]          # start the context for DIR (default: current directory)
+pond ls                          # list running contexts across directories
+pond down [DIR]                  # stop a context and remove its containers (keeps data)
+pond open [DIR]                  # open a running context's UI in the browser
+pond logs [DIR] [-f] [--tail N]  # show the context's MiniLake logs
+pond seed [DIR]                  # run the seed scripts again (see Seed data)
+pond reset [DIR] [--yes]         # delete the lake's data, then seed it again
+pond export [DIR] [-o FILE]      # snapshot a stopped context's data to a .tar.gz
+pond import FILE [DIR] [--yes]   # replace a stopped context's data with a snapshot
+pond version                     # print the version
 ```
 
 Flags for `up` (each flag can also be set with an environment variable):
 
 | Flag | Environment variable | Default | Description |
 | --- | --- | --- | --- |
-| `--port N` | `POND_PORT` | 8700, or the next free port | UI port. With an explicit port, pond fails instead of picking another one. |
-| `--host HOST` | `POND_HOST` | `127.0.0.1` | Address the UI binds to. |
+| `--port N` | `POND_PORT` | the context's last port, else 8700, else the next free one | UI port. With an explicit port, pond fails instead of picking another one. |
+| `--host HOST` | `POND_HOST` | `127.0.0.1` | Address the UI binds to. See [Sharing a context](#sharing-a-context). |
 | `--image IMAGE` | `POND_MINILAKE_IMAGE` | `ghcr.io/dmux/minilake:1.9.0` | MiniLake container image. |
 | `--minilake URL` | `MINILAKE_URL` | none | Use a MiniLake you run yourself instead of starting a container. |
 | `--open` | none | off | Open the UI in a browser. |
 
 Set `POND_VERBOSE=1` to log every HTTP request pond serves.
+
+`reset` and `import` ask you to type the context's name before deleting data, unless you pass `--yes`.
 
 The directory has to be visible to Docker. colima and Docker Desktop share your home directory by default. If Docker can't see the path, pond refuses to start and explains why.
 
@@ -72,10 +80,49 @@ Each directory is its own **context**, so data from different projects never mix
 
 - **Data** lives in `<dir>/.pond/`, which contains its own `.gitignore` so git ignores it. Catalogs, Delta files, volumes, jobs, queries and secrets survive restarts.
 - **One MiniLake container** runs per context, named `pond-<name>-<hash>-minilake`, on its own Docker network, `pond-<name>-<hash>`. MiniLake's Spark job containers join that network, so they are scoped to the context and can call back into its MiniLake.
-- **The URL is stable.** The context remembers its UI port, so an MCP registration keeps pointing at the same context.
+- **The URL is stable.** The context remembers its UI port, so an MCP registration keeps pointing at the same context. If another program holds that port, pond uses a free one for that run and tells you which MCP registrations won't reach it.
+- **One pond per context.** The running pond holds a lock on `.pond/lock`, so a second `pond` in the same directory points you at the first one instead of starting another lake.
 - **The context name is visible everywhere:** in the terminal banner, the UI header, the browser tab title, the suggested MCP server name and WebMCP's `get_view` tool.
 
 Ctrl-C stops the context gracefully (MiniLake snapshots its state), then removes every container on the context's network and the network itself. If pond was killed, the next `pond` in that directory cleans up the leftovers first.
+
+## Seed data
+
+A project can describe its sample data instead of committing it. Put `.sql` and `.py` files in `pond-seed/` in the project directory. The first time a context starts with an empty lake, pond runs them in filename order:
+
+```
+my-project/
+  pond-seed/
+    01_catalog.sql
+    02_generate.py
+```
+
+```sql
+-- pond-seed/01_catalog.sql
+CREATE CATALOG IF NOT EXISTS shop;
+CREATE SCHEMA IF NOT EXISTS shop.raw;
+CREATE OR REPLACE TABLE shop.raw.customers AS
+  SELECT i AS id, 'customer_' || i AS name FROM range(1000) t(i);
+```
+
+- **SQL files** can hold several statements, separated by semicolons, in MiniLake's DuckDB dialect. Pond runs `CREATE CATALOG [IF NOT EXISTS] name` through Unity Catalog itself, because DuckDB has no such statement.
+- **Python files** run as one-off jobs, so they can use PySpark. They are saved in the workspace under `/Shared/pond/seed/`.
+
+Seeding stops at the first failure and prints the error, including the end of a failed Python run's output. Fix the script, then run `pond seed` to run all the scripts again, or `pond reset` to start from an empty lake. Scripts that use `IF NOT EXISTS` or `CREATE OR REPLACE` can safely run more than once.
+
+## Snapshots
+
+`pond export` writes a stopped context's lake data to a `.tar.gz` file, and `pond import` loads one into a stopped context, replacing its data. Use them to back up a lake or hand it to someone else. Snapshots leave out MiniLake's download caches. If a snapshot is damaged or contains paths outside the lake, `import` refuses it and leaves the existing data unchanged.
+
+## Sharing a context
+
+By default, pond listens on `127.0.0.1`, so only your machine can reach it. To let others on your network use a context, start it with a host that other machines can reach:
+
+```sh
+pond --host 0.0.0.0
+```
+
+Pond prints a warning and the URLs others can use. Anyone who can reach the port can read and change the lake and run code in it, because MiniLake has no authentication. Pond accepts requests addressed to this machine's hostname and IP addresses, and refuses other names, which keeps DNS-rebinding attacks out.
 
 ## UI
 
@@ -127,22 +174,25 @@ In browsers without native WebMCP, load a WebMCP polyfill (for example MCP-B's `
 
 ```sh
 go run . ~/some/dir          # run from a checkout
-go test ./...                # tests use a fake docker CLI, no daemon needed
+go test ./...                # Go tests use a fake docker CLI and fake MiniLake; no daemon needed
+node --test web/test/        # UI tests only (go test runs these too when node is installed)
 go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 ```
 
 The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`.
 
 ```
-main.go                      CLI: up / ls / down / version
-internal/pondctx/            per-directory contexts: containers, network, .pond/ (docker CLI only)
+main.go                      CLI: up, ls, down, open, logs, seed, reset, export, import, version
+internal/pondctx/            per-directory contexts: containers, network, lock, .pond/ data and snapshots
 internal/server/             embedded UI, MiniLake proxy (/api, /_minilake, /mcp), /pond/config
-internal/lake/               the few MiniLake calls the server makes itself (warehouse, MCP probe)
+internal/lake/               MiniLake calls pond makes itself: warehouse, SQL, catalogs, runs, reset
+internal/seed/               runs pond-seed/ scripts
 web/static/                  UI: plain HTML/CSS/JS modules, no build step
   lake.js                    MiniLake API client, shared by UI and WebMCP
   app.js                     shell: routing, catalog tree, status, agent activity
   views/                     data, query, jobs, files, admin
   webmcp.js                  WebMCP tool definitions
+web/test/                    UI unit tests (node --test, no dependencies)
 ```
 
 ## License
