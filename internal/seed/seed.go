@@ -1,0 +1,188 @@
+// Package seed fills a fresh lake from scripts committed next to the project.
+//
+// Seeds generate their data rather than ship it: `pond-seed/` holds `.sql` and `.py`
+// files that run in name order. SQL files may hold several statements, and may create
+// catalogs with `CREATE CATALOG [IF NOT EXISTS] name`, which pond runs through Unity
+// Catalog because MiniLake's DuckDB has no such statement. Python files run as one-off
+// jobs, so they can use PySpark.
+package seed
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+
+	"github.com/asabla/pond/internal/lake"
+)
+
+// Dir is the folder, relative to the context directory, that holds seed scripts.
+const Dir = "pond-seed"
+
+// WorkspaceDir is where Python seeds are saved in the lake's workspace.
+const WorkspaceDir = "/Shared/pond/seed"
+
+// Lake is the part of the MiniLake client seeding uses.
+type Lake interface {
+	ExecSQL(ctx context.Context, statement string) error
+	CreateCatalog(ctx context.Context, name string, ifNotExists bool) error
+	RunPython(ctx context.Context, name, path, source string) (*lake.RunResult, error)
+}
+
+// Files returns the seed scripts in dir in the order they run, or nil when there are none.
+func Files(dir string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(dir, Dir))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		if ext := filepath.Ext(e.Name()); !e.IsDir() && (ext == ".sql" || ext == ".py") {
+			files = append(files, filepath.Join(dir, Dir, e.Name()))
+		}
+	}
+	slices.Sort(files)
+	return files, nil
+}
+
+// Run runs every seed script in dir, stopping at the first failure.
+func Run(ctx context.Context, l Lake, dir string, logf func(string, ...any)) error {
+	files, err := Files(dir)
+	if err != nil || len(files) == 0 {
+		return err
+	}
+	logf("Seeding from %s/ (%d files)…", Dir, len(files))
+	for _, path := range files {
+		name := filepath.Base(path)
+		logf("  %s", name)
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if filepath.Ext(name) == ".sql" {
+			err = runSQL(ctx, l, string(src))
+		} else {
+			err = runPython(ctx, l, name, string(src))
+		}
+		if err != nil {
+			return fmt.Errorf("seed %s: %w", name, err)
+		}
+	}
+	logf("Seeded.")
+	return nil
+}
+
+var createCatalog = regexp.MustCompile("(?is)^create\\s+catalog\\s+(if\\s+not\\s+exists\\s+)?(\\w+|`[^`]+`|\"[^\"]+\")$")
+
+func runSQL(ctx context.Context, l Lake, src string) error {
+	for i, stmt := range SplitSQL(src) {
+		var err error
+		if m := createCatalog.FindStringSubmatch(stripComments(stmt)); m != nil {
+			err = l.CreateCatalog(ctx, strings.Trim(m[2], "`\""), m[1] != "")
+		} else {
+			err = l.ExecSQL(ctx, stmt)
+		}
+		if err != nil {
+			return fmt.Errorf("statement %d (%s): %w", i+1, firstLine(stmt), err)
+		}
+	}
+	return nil
+}
+
+func runPython(ctx context.Context, l Lake, name, src string) error {
+	res, err := l.RunPython(ctx, "seed: "+name, WorkspaceDir+"/"+name, src)
+	if err != nil {
+		return err
+	}
+	if !res.OK {
+		msg := strings.TrimSpace(res.Error)
+		if logs := strings.TrimSpace(sparkNoise.ReplaceAllString(res.Logs, "")); logs != "" {
+			msg += "\n" + tail(logs, 20)
+		}
+		return fmt.Errorf("run %d ended %s: %s", res.RunID, strings.ToLower(res.State), msg)
+	}
+	return nil
+}
+
+// sparkNoise matches Spark's own INFO and WARN lines, which bury a script's traceback.
+var sparkNoise = regexp.MustCompile(`(?m)^\d\d/\d\d/\d\d \d\d:\d\d:\d\d (INFO|WARN) .*\n?`)
+
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	if len(line) > 60 {
+		line = line[:57] + "..."
+	}
+	return line
+}
+
+func tail(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	return strings.Join(lines[max(0, len(lines)-n):], "\n")
+}
+
+// SplitSQL splits a script into statements on semicolons outside quotes and comments,
+// dropping empty statements. Comments are kept with the statement they precede.
+func SplitSQL(src string) []string {
+	var out []string
+	start := 0
+	emit := func(end int) {
+		if stmt := strings.TrimSpace(src[start:end]); stripComments(stmt) != "" {
+			out = append(out, stmt)
+		}
+	}
+	for i := 0; i < len(src); i++ {
+		switch {
+		case src[i] == '\'' || src[i] == '"' || src[i] == '`':
+			i = skipQuoted(src, i, src[i])
+		case strings.HasPrefix(src[i:], "--"):
+			i = skipTo(src, i, "\n")
+		case strings.HasPrefix(src[i:], "/*"):
+			i = skipTo(src, i+2, "*/") + 1
+		case src[i] == '$':
+			if tag := dollarTag(src[i:]); tag != "" {
+				i = skipTo(src, i+len(tag), tag) + len(tag) - 1
+			}
+		case src[i] == ';':
+			emit(i)
+			start = i + 1
+		}
+	}
+	emit(len(src))
+	return out
+}
+
+// skipQuoted returns the index of the closing quote; a doubled quote is an escaped one.
+func skipQuoted(s string, i int, q byte) int {
+	for i++; i < len(s); i++ {
+		if s[i] == q {
+			if i+1 < len(s) && s[i+1] == q {
+				i++
+				continue
+			}
+			return i
+		}
+	}
+	return len(s)
+}
+
+// skipTo returns the index where end starts, at or after i, or the end of s.
+func skipTo(s string, i int, end string) int {
+	if j := strings.Index(s[i:], end); j >= 0 {
+		return i + j
+	}
+	return len(s)
+}
+
+var dollarTagRE = regexp.MustCompile(`^\$[A-Za-z_]*\$`)
+
+func dollarTag(s string) string { return dollarTagRE.FindString(s) }
+
+var commentRE = regexp.MustCompile(`(?s)--[^\n]*|/\*.*?\*/`)
+
+func stripComments(s string) string { return strings.TrimSpace(commentRE.ReplaceAllString(s, "")) }
