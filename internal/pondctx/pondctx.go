@@ -356,6 +356,21 @@ func Stop(c Context) {
 	docker(bg, false, "network", "rm", c.Network())
 }
 
+// Exists reports whether the context's MiniLake container exists, running or not.
+func Exists(c Context) bool {
+	_, err := docker(context.Background(), true, "inspect", "-f", "{{.Id}}", c.Container())
+	return err == nil
+}
+
+// LogsCommand prints the context's MiniLake logs. tail is a line count or "all".
+func LogsCommand(c Context, follow bool, tail string) *exec.Cmd {
+	args := []string{"logs", "--tail", tail}
+	if follow {
+		args = append(args, "--follow")
+	}
+	return exec.Command("docker", append(args, c.Container())...)
+}
+
 type Running struct {
 	Name, Dir, UI, Status string
 }

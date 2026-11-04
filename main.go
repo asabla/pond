@@ -37,6 +37,8 @@ Usage:
   pond [up] [DIR] [flags]   start the context for DIR (default: current directory)
   pond ls                   list running contexts
   pond down [DIR]           stop the context for DIR and remove its containers (keeps data)
+  pond open [DIR]           open the UI of a running context in a browser
+  pond logs [DIR] [flags]   show the context's MiniLake logs
   pond version              print the version
 
 Flags for up:
@@ -46,6 +48,10 @@ Flags for up:
   --minilake URL use an already running MiniLake at this URL instead of starting a container
                  (env MINILAKE_URL)
   --open         open the UI in a browser
+
+Flags for logs:
+  -f, --follow   keep printing new log lines
+  --tail N       lines to show from the end (default: 200, "all" for everything)
 `
 )
 
@@ -58,7 +64,11 @@ type args struct {
 	image        string
 	minilake     string
 	open         bool
+	follow       bool
+	tail         string
 }
+
+var commands = []string{"up", "ls", "down", "open", "logs", "version"}
 
 var errHelp = errors.New("help requested")
 
@@ -81,6 +91,10 @@ func main() {
 		err = ls()
 	case "down":
 		err = down(a)
+	case "open":
+		err = openContext(a)
+	case "logs":
+		err = logs(a)
 	case "version":
 		fmt.Println("pond", version)
 	}
@@ -92,7 +106,7 @@ func main() {
 
 func parse(argv []string) (*args, error) {
 	// Bare `pond` and `pond <dir>` mean `pond up`.
-	if len(argv) == 0 || !slices.Contains([]string{"up", "ls", "down", "version", "-h", "--help"}, argv[0]) {
+	if len(argv) == 0 || !slices.Contains(append(commands, "-h", "--help"), argv[0]) {
 		argv = append([]string{"up"}, argv...)
 	}
 	if argv[0] == "-h" || argv[0] == "--help" {
@@ -102,12 +116,18 @@ func parse(argv []string) (*args, error) {
 	fs := flag.NewFlagSet(a.command, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
-	port := fs.Int("port", 0, "")
-	if a.command == "up" {
+	var port *int
+	switch a.command {
+	case "up":
+		port = fs.Int("port", 0, "")
 		fs.StringVar(&a.host, "host", envOr("POND_HOST", "127.0.0.1"), "")
 		fs.StringVar(&a.image, "image", pondctx.DefaultImage(), "")
 		fs.StringVar(&a.minilake, "minilake", os.Getenv("MINILAKE_URL"), "")
 		fs.BoolVar(&a.open, "open", false, "")
+	case "logs":
+		fs.BoolVar(&a.follow, "follow", false, "")
+		fs.BoolVar(&a.follow, "f", false, "")
+		fs.StringVar(&a.tail, "tail", "200", "")
 	}
 	// Flags may follow the directory, as in `pond up DIR --open`.
 	var positional []string
@@ -125,13 +145,13 @@ func parse(argv []string) (*args, error) {
 		positional = append(positional, fs.Arg(0))
 		rest = fs.Args()[1:]
 	}
-	if a.command == "ls" || a.command == "version" {
-		if len(positional) > 0 || flagSet(fs, "port") {
-			return nil, fmt.Errorf("unexpected argument for %s", a.command)
+	if a.command == "logs" && a.tail != "all" {
+		if n, err := strconv.Atoi(a.tail); err != nil || n < 0 {
+			return nil, fmt.Errorf("--tail takes a line count or \"all\", got %q", a.tail)
 		}
 	}
-	if (a.command == "down") && flagSet(fs, "port") {
-		return nil, errors.New("unknown flag: -port")
+	if (a.command == "ls" || a.command == "version") && len(positional) > 0 {
+		return nil, fmt.Errorf("unexpected argument for %s", a.command)
 	}
 	if len(positional) > 1 {
 		return nil, fmt.Errorf("unexpected argument %q", positional[1])
@@ -412,6 +432,48 @@ func ls() error {
 		fmt.Println(strings.Join(cells, "  "), r[3])
 	}
 	return nil
+}
+
+// serving returns the running pond for DIR, or an error saying how to start it.
+func serving(dir string) (pondctx.Context, *pondctx.RunInfo, error) {
+	c := pondctx.ForDir(dir)
+	info := pondctx.Serving(c)
+	if info == nil || info.UI == "" {
+		return c, nil, fmt.Errorf("%s is not running. Start it with `%s`", c.Name(), startCommand(dir))
+	}
+	return c, info, nil
+}
+
+func startCommand(dir string) string {
+	if dir == "." {
+		return "pond"
+	}
+	return "pond " + dir
+}
+
+func openContext(a *args) error {
+	_, info, err := serving(a.dir)
+	if err != nil {
+		return err
+	}
+	openBrowser(info.UI + "/")
+	return nil
+}
+
+func logs(a *args) error {
+	c := pondctx.ForDir(a.dir)
+	if !pondctx.Exists(c) {
+		return fmt.Errorf("%s has no MiniLake container. Start it with `%s`", c.Name(), startCommand(a.dir))
+	}
+	cmd := pondctx.LogsCommand(c, a.follow, a.tail)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	// Ctrl-C reaches docker directly and ends `logs -f`; pond just waits for it.
+	signal.Ignore(os.Interrupt)
+	err := cmd.Run()
+	if cmd.ProcessState != nil && !cmd.ProcessState.Exited() {
+		return nil // stopped by Ctrl-C
+	}
+	return err
 }
 
 func down(a *args) error {

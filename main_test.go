@@ -93,3 +93,23 @@ func TestOnlyLoopbackHostsCountAsLocal(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAndLogs(t *testing.T) {
+	if a, err := parse([]string{"open", "proj"}); err != nil || a.command != "open" || a.dir != "proj" {
+		t.Errorf("open: %+v, %v", a, err)
+	}
+	a, err := parse([]string{"logs"})
+	if err != nil || a.command != "logs" || a.follow || a.tail != "200" {
+		t.Errorf("logs defaults: %+v, %v", a, err)
+	}
+	a, err = parse([]string{"logs", "proj", "-f", "--tail", "all"})
+	if err != nil || a.dir != "proj" || !a.follow || a.tail != "all" {
+		t.Errorf("logs flags: %+v, %v", a, err)
+	}
+	if _, err := parse([]string{"logs", "--tail", "lots"}); err == nil {
+		t.Error("bad --tail accepted")
+	}
+	if _, err := parse([]string{"down", "--port", "1"}); err == nil {
+		t.Error("--port accepted for down")
+	}
+}
