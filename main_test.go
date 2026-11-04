@@ -113,3 +113,25 @@ func TestOpenAndLogs(t *testing.T) {
 		t.Error("--port accepted for down")
 	}
 }
+
+func TestDataCommands(t *testing.T) {
+	if a, err := parse([]string{"seed", "proj"}); err != nil || a.command != "seed" || a.dir != "proj" {
+		t.Errorf("seed: %+v, %v", a, err)
+	}
+	if a, err := parse([]string{"reset", "--yes"}); err != nil || !a.yes || a.dir != "." {
+		t.Errorf("reset: %+v, %v", a, err)
+	}
+	if a, err := parse([]string{"export", "proj", "-o", "x.tar.gz"}); err != nil || a.output != "x.tar.gz" || a.dir != "proj" {
+		t.Errorf("export: %+v, %v", a, err)
+	}
+	a, err := parse([]string{"import", "snap.tar.gz", "proj", "-y"})
+	if err != nil || a.file != "snap.tar.gz" || a.dir != "proj" || !a.yes {
+		t.Errorf("import: %+v, %v", a, err)
+	}
+	if a, err := parse([]string{"import", "snap.tar.gz"}); err != nil || a.dir != "." {
+		t.Errorf("import default dir: %+v, %v", a, err)
+	}
+	if _, err := parse([]string{"import"}); err == nil {
+		t.Error("import without a file accepted")
+	}
+}

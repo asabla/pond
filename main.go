@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -13,14 +14,17 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/asabla/pond/internal/lake"
 	"github.com/asabla/pond/internal/pondctx"
+	"github.com/asabla/pond/internal/seed"
 	"github.com/asabla/pond/internal/server"
 	"github.com/asabla/pond/web"
 )
@@ -39,6 +43,10 @@ Usage:
   pond down [DIR]           stop the context for DIR and remove its containers (keeps data)
   pond open [DIR]           open the UI of a running context in a browser
   pond logs [DIR] [flags]   show the context's MiniLake logs
+  pond seed [DIR]           run DIR/pond-seed/ scripts against the running context
+  pond reset [DIR] [--yes]  delete the context's lake data, then seed it again
+  pond export [DIR] [-o FILE]       write the lake's data to a .tar.gz snapshot
+  pond import FILE [DIR] [--yes]    replace the lake's data with a snapshot
   pond version              print the version
 
 Flags for up:
@@ -52,6 +60,10 @@ Flags for up:
 Flags for logs:
   -f, --follow   keep printing new log lines
   --tail N       lines to show from the end (default: 200, "all" for everything)
+
+A new context runs the .sql and .py files in DIR/pond-seed/ in name order, so a project
+can generate its sample data instead of shipping it. export and import need the context
+stopped (pond down).
 `
 )
 
@@ -66,9 +78,12 @@ type args struct {
 	open         bool
 	follow       bool
 	tail         string
+	yes          bool
+	output       string
+	file         string
 }
 
-var commands = []string{"up", "ls", "down", "open", "logs", "version"}
+var commands = []string{"up", "ls", "down", "open", "logs", "seed", "reset", "export", "import", "version"}
 
 var errHelp = errors.New("help requested")
 
@@ -95,6 +110,14 @@ func main() {
 		err = openContext(a)
 	case "logs":
 		err = logs(a)
+	case "seed":
+		err = seedContext(a)
+	case "reset":
+		err = reset(a)
+	case "export":
+		err = export(a)
+	case "import":
+		err = importSnapshot(a)
 	case "version":
 		fmt.Println("pond", version)
 	}
@@ -128,6 +151,12 @@ func parse(argv []string) (*args, error) {
 		fs.BoolVar(&a.follow, "follow", false, "")
 		fs.BoolVar(&a.follow, "f", false, "")
 		fs.StringVar(&a.tail, "tail", "200", "")
+	case "reset", "import":
+		fs.BoolVar(&a.yes, "yes", false, "")
+		fs.BoolVar(&a.yes, "y", false, "")
+	case "export":
+		fs.StringVar(&a.output, "output", "", "")
+		fs.StringVar(&a.output, "o", "", "")
 	}
 	// Flags may follow the directory, as in `pond up DIR --open`.
 	var positional []string
@@ -152,6 +181,12 @@ func parse(argv []string) (*args, error) {
 	}
 	if (a.command == "ls" || a.command == "version") && len(positional) > 0 {
 		return nil, fmt.Errorf("unexpected argument for %s", a.command)
+	}
+	if a.command == "import" {
+		if len(positional) == 0 {
+			return nil, errors.New("import needs a snapshot file")
+		}
+		a.file, positional = positional[0], positional[1:]
 	}
 	if len(positional) > 1 {
 		return nil, fmt.Errorf("unexpected argument %q", positional[1])
@@ -244,6 +279,7 @@ func machineNames() []string {
 
 func up(a *args) error {
 	var c *pondctx.Context
+	fresh := false
 	if a.minilake == "" {
 		cc := pondctx.ForDir(a.dir)
 		c = &cc
@@ -251,6 +287,7 @@ func up(a *args) error {
 			return fmt.Errorf("%s is not a directory", c.Dir)
 		}
 		lock, err := pondctx.Acquire(*c)
+		fresh = pondctx.Fresh(*c)
 		if errors.Is(err, pondctx.ErrRunning) {
 			if info := pondctx.Serving(*c); info != nil && info.UI != "" {
 				logf("pond · %s is already running: %s", c.Name(), info.UI)
@@ -378,6 +415,14 @@ func up(a *args) error {
 
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
+	if c != nil && fresh {
+		go func() {
+			if err := seed.Run(sig, client, c.Dir, logf); err != nil && sig.Err() == nil {
+				logf("! %v", err)
+				logf("  Fix the script, then run `pond seed` (or `pond reset` to start over).")
+			}
+		}()
+	}
 	select {
 	case <-sig.Done():
 		return nil
@@ -474,6 +519,126 @@ func logs(a *args) error {
 		return nil // stopped by Ctrl-C
 	}
 	return err
+}
+
+func seedContext(a *args) error {
+	c, info, err := serving(a.dir)
+	if err != nil {
+		return err
+	}
+	if files, err := seed.Files(c.Dir); err != nil || len(files) == 0 {
+		if err == nil {
+			err = fmt.Errorf("no .sql or .py files in %s", filepath.Join(c.Dir, seed.Dir))
+		}
+		return err
+	}
+	client, err := lake.New(info.Minilake)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return seed.Run(ctx, client, c.Dir, logf)
+}
+
+// confirm asks the user to type want. It refuses without a terminal to ask on.
+func confirm(prompt, want string) error {
+	st, err := os.Stdin.Stat()
+	null, _ := os.Stat(os.DevNull)
+	if err != nil || st.Mode()&os.ModeCharDevice == 0 || os.SameFile(st, null) {
+		return errors.New("not a terminal, so not asking for confirmation; pass --yes")
+	}
+	fmt.Fprintf(os.Stderr, "%s\nType %q to continue: ", prompt, want)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	if strings.TrimSpace(line) != want {
+		return errors.New("cancelled")
+	}
+	return nil
+}
+
+func reset(a *args) error {
+	c := pondctx.ForDir(a.dir)
+	info := pondctx.Serving(c)
+	if !a.yes {
+		if err := confirm(fmt.Sprintf("This deletes every catalog, table, file, job, query and secret in %s.", c.Name()), c.Name()); err != nil {
+			return err
+		}
+	}
+	if info == nil {
+		if err := pondctx.ClearData(c); err != nil {
+			return err
+		}
+		logf("Deleted the lake data of %s. The next `%s` starts it fresh and runs its seeds.", c.Name(), startCommand(a.dir))
+		return nil
+	}
+	if info.Minilake == "" {
+		return fmt.Errorf("%s is still starting; try again in a moment", c.Name())
+	}
+	client, err := lake.New(info.Minilake)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := client.Reset(ctx); err != nil {
+		return err
+	}
+	logf("Reset the lake of %s.", c.Name())
+	return seed.Run(ctx, client, c.Dir, logf)
+}
+
+func stopped(c pondctx.Context, dir string) error {
+	if pondctx.Serving(c) != nil {
+		return fmt.Errorf("%s is running. Stop it first with `pond down%s`", c.Name(), strings.TrimPrefix(startCommand(dir), "pond"))
+	}
+	return nil
+}
+
+func export(a *args) error {
+	c := pondctx.ForDir(a.dir)
+	if err := stopped(c, a.dir); err != nil {
+		return err
+	}
+	out := a.output
+	if out == "" {
+		out = fmt.Sprintf("%s-%s.pond.tar.gz", c.Name(), time.Now().Format("20060102-150405"))
+	}
+	f, err := os.OpenFile(out, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := pondctx.Export(c, f); err != nil {
+		f.Close()
+		os.Remove(out)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	logf("Exported the lake of %s to %s.", c.Name(), out)
+	return nil
+}
+
+func importSnapshot(a *args) error {
+	c := pondctx.ForDir(a.dir)
+	if err := stopped(c, a.dir); err != nil {
+		return err
+	}
+	f, err := os.Open(a.file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if !pondctx.Fresh(c) && !a.yes {
+		if err := confirm(fmt.Sprintf("%s already has lake data. Importing replaces all of it.", c.Name()), c.Name()); err != nil {
+			return err
+		}
+	}
+	if err := pondctx.Import(c, f); err != nil {
+		return err
+	}
+	logf("Imported %s into %s. Start it with `%s`.", a.file, c.Name(), startCommand(a.dir))
+	return nil
 }
 
 func down(a *args) error {

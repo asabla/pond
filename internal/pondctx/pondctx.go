@@ -223,7 +223,7 @@ func WriteRunFile(c Context, info RunInfo) error {
 }
 
 func PrepareStateDir(c Context) error {
-	if err := os.MkdirAll(filepath.Join(c.StateDir(), "data"), 0o755); err != nil {
+	if err := os.MkdirAll(c.DataPath(), 0o755); err != nil {
 		return err
 	}
 	ignore := filepath.Join(c.StateDir(), ".gitignore")
