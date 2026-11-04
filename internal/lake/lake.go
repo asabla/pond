@@ -4,7 +4,9 @@ package lake
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,7 +46,11 @@ func (c *Client) URL() string { return c.url }
 func (c *Client) Target() *url.URL { return c.target }
 
 func (c *Client) requestJSON(ctx context.Context, method, path string, body any) (map[string]json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	return c.requestJSONTimeout(ctx, 10*time.Second, method, path, body)
+}
+
+func (c *Client) requestJSONTimeout(ctx context.Context, timeout time.Duration, method, path string, body any) (map[string]json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var payload io.Reader
 	if body != nil {
@@ -71,6 +77,10 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, body any)
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
+		var e struct{ Message string }
+		if json.Unmarshal(data, &e) == nil && e.Message != "" {
+			return nil, &Error{Status: resp.StatusCode, Message: e.Message}
+		}
 		return nil, fmt.Errorf("%s %s -> %d: %q", method, path, resp.StatusCode, truncate(data, 300))
 	}
 	out := map[string]json.RawMessage{}
@@ -81,6 +91,14 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, body any)
 	}
 	return out, nil
 }
+
+// Error is a MiniLake error response.
+type Error struct {
+	Status  int
+	Message string
+}
+
+func (e *Error) Error() string { return e.Message }
 
 func truncate(b []byte, n int) []byte {
 	if len(b) > n {
@@ -152,4 +170,157 @@ func (c *Client) MCPEnabled(ctx context.Context) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode != http.StatusNotFound
+}
+
+// Poll intervals for statements and runs; tests shorten them.
+var (
+	pollInterval    = 250 * time.Millisecond
+	runPollInterval = time.Second
+)
+
+func sleep(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// ExecSQL runs one statement on the context's warehouse and waits for it to finish.
+func (c *Client) ExecSQL(ctx context.Context, statement string) error {
+	warehouse, err := c.WarehouseID(ctx)
+	if err != nil {
+		return err
+	}
+	out, err := c.requestJSONTimeout(ctx, 60*time.Second, http.MethodPost, "/api/2.0/sql/statements",
+		map[string]string{"warehouse_id": warehouse, "statement": statement, "wait_timeout": "30s"})
+	for err == nil {
+		var st struct {
+			ID     string `json:"statement_id"`
+			Status struct {
+				State string
+				Error *struct{ Message string }
+			}
+		}
+		raw, _ := json.Marshal(out)
+		if err := json.Unmarshal(raw, &st); err != nil {
+			return err
+		}
+		switch st.Status.State {
+		case "SUCCEEDED":
+			return nil
+		case "PENDING", "RUNNING":
+			if err := sleep(ctx, pollInterval); err != nil {
+				return err
+			}
+			out, err = c.requestJSON(ctx, http.MethodGet, "/api/2.0/sql/statements/"+url.PathEscape(st.ID), nil)
+		default:
+			if st.Status.Error != nil && st.Status.Error.Message != "" {
+				return errors.New(st.Status.Error.Message)
+			}
+			return fmt.Errorf("statement %s", strings.ToLower(st.Status.State))
+		}
+	}
+	return err
+}
+
+// CreateCatalog creates a Unity Catalog catalog. SQL can't: MiniLake's DuckDB has no CREATE CATALOG.
+func (c *Client) CreateCatalog(ctx context.Context, name string, ifNotExists bool) error {
+	if ifNotExists {
+		out, err := c.requestJSON(ctx, http.MethodGet, "/api/2.1/unity-catalog/catalogs/"+url.PathEscape(name), nil)
+		if err == nil && len(out) > 0 {
+			return nil
+		}
+		var lerr *Error
+		if err != nil && !(errors.As(err, &lerr) && lerr.Status == http.StatusNotFound) {
+			return err
+		}
+	}
+	_, err := c.requestJSON(ctx, http.MethodPost, "/api/2.1/unity-catalog/catalogs", map[string]string{"name": name})
+	return err
+}
+
+// RunResult is how a Python run ended.
+type RunResult struct {
+	RunID int64
+	OK    bool
+	State string // result state, such as SUCCESS or FAILED
+	Error string
+	Logs  string
+}
+
+// RunPython saves source to the workspace at path, runs it once and waits for it to finish.
+func (c *Client) RunPython(ctx context.Context, name, path, source string) (*RunResult, error) {
+	dir := path[:strings.LastIndex(path, "/")]
+	if _, err := c.requestJSON(ctx, http.MethodPost, "/api/2.0/workspace/mkdirs", map[string]string{"path": dir}); err != nil {
+		return nil, err
+	}
+	if _, err := c.requestJSON(ctx, http.MethodPost, "/api/2.0/workspace/import", map[string]any{
+		"path": path, "format": "SOURCE", "language": "PYTHON", "overwrite": true,
+		"content": base64.StdEncoding.EncodeToString([]byte(source)),
+	}); err != nil {
+		return nil, err
+	}
+	out, err := c.requestJSON(ctx, http.MethodPost, "/api/2.2/jobs/runs/submit", map[string]any{
+		"run_name": name,
+		"tasks":    []any{map[string]any{"task_key": "main", "spark_python_task": map[string]string{"python_file": path}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var runID int64
+	if err := json.Unmarshal(out["run_id"], &runID); err != nil {
+		return nil, fmt.Errorf("run submitted without run_id")
+	}
+	for {
+		out, err := c.requestJSON(ctx, http.MethodGet, fmt.Sprintf("/api/2.2/jobs/runs/get?run_id=%d", runID), nil)
+		if err != nil {
+			return nil, err
+		}
+		var run struct {
+			State struct {
+				LifeCycle string `json:"life_cycle_state"`
+				Result    string `json:"result_state"`
+				Message   string `json:"state_message"`
+			}
+			Tasks []struct {
+				RunID int64 `json:"run_id"`
+			}
+		}
+		raw, _ := json.Marshal(out)
+		if err := json.Unmarshal(raw, &run); err != nil {
+			return nil, err
+		}
+		switch run.State.LifeCycle {
+		case "TERMINATED", "SKIPPED", "INTERNAL_ERROR":
+			res := &RunResult{RunID: runID, State: run.State.Result, OK: run.State.Result == "SUCCESS", Error: run.State.Message}
+			outputID := runID
+			if len(run.Tasks) > 0 && run.Tasks[0].RunID != 0 {
+				outputID = run.Tasks[0].RunID
+			}
+			if output, err := c.requestJSON(ctx, http.MethodGet, fmt.Sprintf("/api/2.2/jobs/runs/get-output?run_id=%d", outputID), nil); err == nil {
+				var o struct{ Logs, Error string }
+				raw, _ := json.Marshal(output)
+				json.Unmarshal(raw, &o)
+				res.Logs = o.Logs
+				if o.Error != "" {
+					res.Error = o.Error
+				}
+			}
+			return res, nil
+		}
+		if err := sleep(ctx, runPollInterval); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// Reset wipes the lake: catalogs, tables, files, jobs, queries and secrets.
+func (c *Client) Reset(ctx context.Context) error {
+	_, err := c.requestJSONTimeout(ctx, 120*time.Second, http.MethodPost, "/_minilake/reset", nil)
+	c.mu.Lock()
+	c.warehouseID = "" // reset drops warehouses too
+	c.mu.Unlock()
+	return err
 }
