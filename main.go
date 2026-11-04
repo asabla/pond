@@ -314,6 +314,11 @@ func up(a *args) error {
 	})}
 
 	uiPort := ln.Addr().(*net.TCPAddr).Port
+	if c != nil && !a.portExplicit && port != uiPort && port == c.PreferredPort() {
+		logf("! Port %d, where this context usually runs, is in use; using %d for this run.", port, uiPort)
+		logf("  MCP clients registered at port %d won't reach it. Re-register with the command below,", port)
+		logf("  or free port %d and restart pond.", port)
+	}
 	ui := fmt.Sprintf("http://localhost:%d", uiPort)
 	mcpName := "pond"
 	if c != nil {
@@ -321,8 +326,11 @@ func up(a *args) error {
 		if err := pondctx.WriteRunFile(*c, pondctx.RunInfo{PID: os.Getpid(), UI: ui, Minilake: url}); err != nil {
 			return err
 		}
-		if err := os.WriteFile(c.PortFile(), []byte(strconv.Itoa(uiPort)), 0o644); err != nil {
-			return err
+		// Keep the remembered port when this run fell back, so the next run returns to it.
+		if c.PreferredPort() == 0 || a.portExplicit {
+			if err := os.WriteFile(c.PortFile(), []byte(strconv.Itoa(uiPort)), 0o644); err != nil {
+				return err
+			}
 		}
 	}
 	logf("  UI    %s/", ui)
