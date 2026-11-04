@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pond</title>
+  <meta name="description" content="A local data lake per directory. Agents can drive this page through WebMCP.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cellipse cx='16' cy='18' rx='14' ry='9' fill='%230e7c86'/%3E%3Cellipse cx='16' cy='17' rx='8' ry='4' fill='%238fd3d9'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/data" aria-label="Pond home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="18" rx="14" ry="9" class="brand-outer"/><ellipse cx="16" cy="17" rx="8" ry="4" class="brand-inner"/></svg>
+      <span class="brand-name">pond</span>
+    </a>
+    <span class="context-chip" id="context" hidden></span>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#/data" data-view="data">Data</a>
+      <a href="#/query" data-view="query">Query <kbd>⌘K</kbd></a>
+      <a href="#/jobs" data-view="jobs">Jobs</a>
+      <a href="#/files" data-view="files">Files</a>
+      <a href="#/admin" data-view="admin">Admin</a>
+    </nav>
+    <div class="status">
+      <span class="pill" id="pill-lake" title="MiniLake connection"><i></i><span>MiniLake</span></span>
+      <span class="pill" id="pill-mcp" title="MCP endpoint for desktop agents"><i></i><span>MCP</span></span>
+      <span class="pill" id="pill-webmcp" title="WebMCP tools registered on this page"><i></i><span>WebMCP</span></span>
+      <button class="pill pill-btn" id="activity-btn" title="Agent activity" aria-expanded="false" hidden><span>Agent</span><b id="activity-count">0</b></button>
+    </div>
+  </header>
+
+  <div class="layout" id="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <input id="filter" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" aria-label="Filter catalog tree">
+        <button class="icon-btn" id="refresh-tree" title="Reload" aria-label="Reload catalogs">↻</button>
+      </div>
+      <ul class="tree" id="tree" role="tree" aria-label="Catalogs"></ul>
+    </aside>
+    <main class="main" id="main"></main>
+  </div>
+
+  <aside class="activity" id="activity" hidden aria-label="Agent activity">
+    <header><b>Agent activity</b><span class="muted">via WebMCP</span></header>
+    <ol id="activity-log"></ol>
+  </aside>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>
