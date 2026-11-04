@@ -150,25 +150,76 @@ func EnsureDocker() error {
 
 type RunInfo struct {
 	PID      int    `json:"pid"`
-	UI       string `json:"ui"`
-	Minilake string `json:"minilake"`
+	UI       string `json:"ui,omitempty"`
+	Minilake string `json:"minilake,omitempty"`
 }
 
-// RunningPID returns the live Pond process already serving this context, if any.
-func RunningPID(c Context) *RunInfo {
-	b, err := os.ReadFile(c.RunFile())
+func (c Context) lockPath() string { return filepath.Join(c.StateDir(), "lock") }
+
+// Lock is held by the pond serving a context for as long as it runs.
+type Lock struct{ f *os.File }
+
+// ErrRunning means another pond holds the context's lock.
+var ErrRunning = errors.New("context is already running")
+
+// Acquire takes the context's lock, or returns ErrRunning when another pond holds it.
+// Holding it also covers startup, before any containers or URLs exist.
+func Acquire(c Context) (*Lock, error) {
+	if err := os.MkdirAll(c.StateDir(), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(c.lockPath(), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
+		return nil, err
+	}
+	ok, err := lockFile(f)
+	if !ok {
+		f.Close()
+		if err == nil {
+			err = ErrRunning
+		}
+		return nil, err
+	}
+	return &Lock{f}, nil
+}
+
+// Release drops the lock. Exiting drops it too.
+func (l *Lock) Release() {
+	if l != nil {
+		l.f.Close()
+	}
+}
+
+// Serving returns the pond serving this context, or nil when none is.
+//
+// The run file alone is not trusted: after a crash or reboot its PID may belong to an
+// unrelated process. Only a held lock proves a pond is alive.
+func Serving(c Context) *RunInfo {
+	if _, err := os.Stat(c.lockPath()); err != nil {
 		return nil
 	}
-	var info RunInfo
-	if json.Unmarshal(b, &info) != nil || info.PID <= 0 {
+	l, err := Acquire(c)
+	if err == nil {
+		l.Release()
 		return nil
 	}
-	proc, err := os.FindProcess(info.PID)
-	if err != nil || proc.Signal(signal0) != nil {
+	if !errors.Is(err, ErrRunning) {
 		return nil
+	}
+	info := RunInfo{}
+	if b, err := os.ReadFile(c.RunFile()); err == nil {
+		json.Unmarshal(b, &info)
 	}
 	return &info
+}
+
+// WriteRunFile records how to reach the pond serving c. Call it while holding the lock.
+func WriteRunFile(c Context, info RunInfo) error {
+	b, err := json.Marshal(info)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.RunFile(), b, 0o644)
 }
 
 func PrepareStateDir(c Context) error {
@@ -336,7 +387,7 @@ func List() ([]Running, error) {
 		}
 		c := ForDir(dir)
 		r := Running{Name: c.Name(), Dir: c.Dir, Status: row.Status}
-		if info := RunningPID(c); info != nil {
+		if info := Serving(c); info != nil {
 			r.UI = info.UI
 		}
 		found = append(found, r)

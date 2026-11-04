@@ -3,6 +3,7 @@ package pondctx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -227,27 +228,40 @@ func TestReportsDockerNotInstalled(t *testing.T) {
 	}
 }
 
-func TestRunningPIDIgnoresStaleRunFile(t *testing.T) {
+func TestServingTrustsTheLockNotThePID(t *testing.T) {
 	f := setup(t)
-	if err := PrepareStateDir(f.ctx); err != nil {
+	// A run file left by a crashed pond, naming a live but unrelated process.
+	if err := os.MkdirAll(f.ctx.StateDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write := func(pid int) {
-		b, _ := json.Marshal(map[string]any{"pid": pid, "ui": "x"})
-		os.WriteFile(f.ctx.RunFile(), b, 0o644)
+	if err := WriteRunFile(f.ctx, RunInfo{PID: os.Getppid(), UI: "x"}); err != nil {
+		t.Fatal(err)
 	}
-	write(1<<22 + 12345)
-	if RunningPID(f.ctx) != nil {
-		t.Error("stale pid reported as running")
+	if Serving(f.ctx) != nil {
+		t.Error("run file without a held lock reported as running")
 	}
-	write(os.Getpid())
-	if info := RunningPID(f.ctx); info == nil || info.UI != "x" {
+
+	lock, err := Acquire(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	WriteRunFile(f.ctx, RunInfo{PID: os.Getpid(), UI: "x"})
+	if info := Serving(f.ctx); info == nil || info.UI != "x" || info.PID != os.Getpid() {
 		t.Errorf("info = %v", info)
 	}
-	os.WriteFile(f.ctx.RunFile(), []byte(`{"ui":"x"}`), 0o644)
-	if RunningPID(f.ctx) != nil {
-		t.Error("run file without pid reported as running")
+	if _, err := Acquire(f.ctx); !errors.Is(err, ErrRunning) {
+		t.Errorf("second Acquire = %v, want ErrRunning", err)
 	}
+
+	lock.Release()
+	if Serving(f.ctx) != nil {
+		t.Error("released lock still reported as running")
+	}
+	again, err := Acquire(f.ctx)
+	if err != nil {
+		t.Errorf("Acquire after Release: %v", err)
+	}
+	again.Release()
 }
 
 func TestListReadsLabelsAndRunFile(t *testing.T) {
@@ -255,9 +269,12 @@ func TestListReadsLabelsAndRunFile(t *testing.T) {
 	if got, err := List(); err != nil || len(got) != 0 {
 		t.Fatalf("empty list: %v, %v", got, err)
 	}
-	PrepareStateDir(f.ctx)
-	b, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "ui": "http://localhost:8700"})
-	os.WriteFile(f.ctx.RunFile(), b, 0o644)
+	lock, err := Acquire(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	WriteRunFile(f.ctx, RunInfo{PID: os.Getpid(), UI: "http://localhost:8700"})
 	row, _ := json.Marshal(map[string]string{
 		"Labels": "pond.context=" + f.ctx.ID() + ",pond.dir=" + f.ctx.Dir, "Status": "Up 1 minute",
 	})

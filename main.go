@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -204,9 +203,21 @@ func up(a *args) error {
 		if st, err := os.Stat(c.Dir); err != nil || !st.IsDir() {
 			return fmt.Errorf("%s is not a directory", c.Dir)
 		}
-		if info := pondctx.RunningPID(*c); info != nil {
-			logf("pond · %s is already running: %s", c.Name(), info.UI)
+		lock, err := pondctx.Acquire(*c)
+		if errors.Is(err, pondctx.ErrRunning) {
+			if info := pondctx.Serving(*c); info != nil && info.UI != "" {
+				logf("pond · %s is already running: %s", c.Name(), info.UI)
+			} else {
+				logf("pond · %s is already starting in another terminal.", c.Name())
+			}
 			return nil
+		}
+		if err != nil {
+			return err
+		}
+		defer lock.Release()
+		if err := pondctx.WriteRunFile(*c, pondctx.RunInfo{PID: os.Getpid()}); err != nil {
+			return err
 		}
 	}
 
@@ -274,8 +285,7 @@ func up(a *args) error {
 	mcpName := "pond"
 	if c != nil {
 		mcpName = "pond-" + c.Name()
-		info, _ := json.Marshal(pondctx.RunInfo{PID: os.Getpid(), UI: ui, Minilake: url})
-		if err := os.WriteFile(c.RunFile(), info, 0o644); err != nil {
+		if err := pondctx.WriteRunFile(*c, pondctx.RunInfo{PID: os.Getpid(), UI: ui, Minilake: url}); err != nil {
 			return err
 		}
 		if err := os.WriteFile(c.PortFile(), []byte(strconv.Itoa(uiPort)), 0o644); err != nil {
@@ -355,7 +365,10 @@ func ls() error {
 
 func down(a *args) error {
 	c := pondctx.ForDir(a.dir)
-	if info := pondctx.RunningPID(c); info != nil {
+	if info := pondctx.Serving(c); info != nil {
+		if info.PID <= 0 {
+			return fmt.Errorf("%s is running, but %s has no pid; stop it with Ctrl-C in its terminal", c.Name(), c.RunFile())
+		}
 		// Let the running pond clean up after itself.
 		proc, err := os.FindProcess(info.PID)
 		if err == nil {
