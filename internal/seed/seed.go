@@ -29,6 +29,7 @@ const WorkspaceDir = "/Shared/pond/seed"
 type Lake interface {
 	ExecSQL(ctx context.Context, statement string) error
 	CreateCatalog(ctx context.Context, name string, ifNotExists bool) error
+	CreateSchema(ctx context.Context, catalog, name string, ifNotExists bool) error
 	RunPython(ctx context.Context, name, path, source string) (*lake.RunResult, error)
 }
 
@@ -78,13 +79,23 @@ func Run(ctx context.Context, l Lake, dir string, logf func(string, ...any)) err
 	return nil
 }
 
-var createCatalog = regexp.MustCompile("(?is)^create\\s+catalog\\s+(if\\s+not\\s+exists\\s+)?(\\w+|`[^`]+`|\"[^\"]+\")$")
+const ident = "(\\w+|`[^`]+`|\"[^\"]+\")"
+
+var (
+	createCatalog = regexp.MustCompile("(?is)^create\\s+catalog\\s+(if\\s+not\\s+exists\\s+)?" + ident + "$")
+	createSchema  = regexp.MustCompile("(?is)^create\\s+schema\\s+(if\\s+not\\s+exists\\s+)?" + ident + "\\." + ident + "$")
+)
+
+func unquote(name string) string { return strings.Trim(name, "`\"") }
 
 func runSQL(ctx context.Context, l Lake, src string) error {
 	for i, stmt := range SplitSQL(src) {
 		var err error
-		if m := createCatalog.FindStringSubmatch(stripComments(stmt)); m != nil {
-			err = l.CreateCatalog(ctx, strings.Trim(m[2], "`\""), m[1] != "")
+		bare := stripComments(stmt)
+		if m := createCatalog.FindStringSubmatch(bare); m != nil {
+			err = l.CreateCatalog(ctx, unquote(m[2]), m[1] != "")
+		} else if m := createSchema.FindStringSubmatch(bare); m != nil {
+			err = l.CreateSchema(ctx, unquote(m[2]), unquote(m[3]), m[1] != "")
 		} else {
 			err = l.ExecSQL(ctx, stmt)
 		}

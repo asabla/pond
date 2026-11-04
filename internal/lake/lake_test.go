@@ -83,6 +83,16 @@ func (f *fakeLake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.catalogs[name] = true
 		send(w, 200, map[string]string{"name": name})
+	case strings.HasPrefix(p, "/api/2.1/unity-catalog/schemas/"):
+		name := strings.TrimPrefix(p, "/api/2.1/unity-catalog/schemas/")
+		if !f.catalogs["schema:"+name] {
+			send(w, 404, map[string]string{"error_code": "NOT_FOUND", "message": "Schema '" + name + "' not found"})
+			return
+		}
+		send(w, 200, map[string]string{"full_name": name})
+	case p == "/api/2.1/unity-catalog/schemas":
+		f.catalogs["schema:"+body["catalog_name"].(string)+"."+body["name"].(string)] = true
+		send(w, 200, map[string]string{})
 	case p == "/api/2.0/workspace/mkdirs":
 		send(w, 200, map[string]string{})
 	case p == "/api/2.0/workspace/import":
@@ -199,6 +209,19 @@ func TestCreateCatalogIfNotExists(t *testing.T) {
 		t.Errorf("second create with IF NOT EXISTS: %v", err)
 	}
 	if n := f.count("POST /api/2.1/unity-catalog/catalogs"); n != 1 {
+		t.Errorf("POSTed %d times", n)
+	}
+}
+
+func TestCreateSchemaIfNotExists(t *testing.T) {
+	f, c := newFake(t)
+	ctx := context.Background()
+	for range 2 {
+		if err := c.CreateSchema(ctx, "shop", "raw", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := f.count("POST /api/2.1/unity-catalog/schemas"); n != 1 {
 		t.Errorf("POSTed %d times", n)
 	}
 }

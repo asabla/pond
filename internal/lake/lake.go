@@ -241,6 +241,23 @@ func (c *Client) CreateCatalog(ctx context.Context, name string, ifNotExists boo
 	return err
 }
 
+// CreateSchema registers a schema in Unity Catalog. A schema made with SQL CREATE SCHEMA
+// works for queries but is missing from the catalog listing, so the UI never shows it.
+func (c *Client) CreateSchema(ctx context.Context, catalog, name string, ifNotExists bool) error {
+	if ifNotExists {
+		_, err := c.requestJSON(ctx, http.MethodGet, "/api/2.1/unity-catalog/schemas/"+url.PathEscape(catalog+"."+name), nil)
+		if err == nil {
+			return nil
+		}
+		var lerr *Error
+		if !(errors.As(err, &lerr) && lerr.Status == http.StatusNotFound) {
+			return err
+		}
+	}
+	_, err := c.requestJSON(ctx, http.MethodPost, "/api/2.1/unity-catalog/schemas", map[string]string{"catalog_name": catalog, "name": name})
+	return err
+}
+
 // RunResult is how a Python run ended.
 type RunResult struct {
 	RunID int64

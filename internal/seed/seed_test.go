@@ -56,6 +56,15 @@ func (f *fakeLake) CreateCatalog(_ context.Context, name string, ifNotExists boo
 	return nil
 }
 
+func (f *fakeLake) CreateSchema(_ context.Context, catalog, name string, ifNotExists bool) error {
+	name = catalog + "." + name
+	if ifNotExists {
+		name += " (if not exists)"
+	}
+	f.calls = append(f.calls, "schema: "+name)
+	return nil
+}
+
 func (f *fakeLake) RunPython(_ context.Context, name, path, _ string) (*lake.RunResult, error) {
 	f.calls = append(f.calls, "python: "+name+" at "+path)
 	r := f.run
@@ -90,7 +99,7 @@ func TestRunsFilesInNameOrder(t *testing.T) {
 	want := []string{
 		"catalog: shop (if not exists)",
 		"catalog: other",
-		"sql: CREATE SCHEMA IF NOT EXISTS shop.raw",
+		"schema: shop.raw (if not exists)",
 		"sql: CREATE TABLE shop.raw.t AS SELECT 1",
 		"python: seed: 03_more.py at /Shared/pond/seed/03_more.py",
 	}

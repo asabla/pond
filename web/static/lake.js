@@ -80,11 +80,36 @@ export const quoteName = (fullName) =>
 
 /* ---------- SQL ---------- */
 
+// MiniLake's DuckDB has no CREATE CATALOG, and a schema made with SQL CREATE SCHEMA works but
+// is missing from Unity Catalog's listing. Both statements go through Unity Catalog instead.
+const IDENT = "(\\w+|`[^`]+`|\"[^\"]+\")";
+const CREATE_CATALOG = new RegExp(`^create\\s+catalog\\s+(if\\s+not\\s+exists\\s+)?${IDENT}\\s*;?$`, "i");
+const CREATE_SCHEMA = new RegExp(`^create\\s+schema\\s+(if\\s+not\\s+exists\\s+)?${IDENT}\\.${IDENT}\\s*;?$`, "i");
+const unquote = (name) => name.replace(/^[`"]|[`"]$/g, "");
+
+async function catalogDdl(statement) {
+  const bare = statement.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").trim();
+  let m = bare.match(CREATE_CATALOG);
+  if (m) {
+    const name = unquote(m[2]);
+    if (!(m[1] && (await listCatalogs()).some((c) => c.name === name))) await createCatalog(name);
+    return true;
+  }
+  m = bare.match(CREATE_SCHEMA);
+  if (m) {
+    const [catalog, name] = [unquote(m[2]), unquote(m[3])];
+    if (!(m[1] && (await listSchemas(catalog)).some((s) => s.name === name))) await createSchema(catalog, name);
+    return true;
+  }
+  return false;
+}
+
 export async function runSql(statement) {
+  const started = performance.now();
+  if (await catalogDdl(statement)) return { statementId: null, columns: [], rows: [], truncated: false, elapsedMs: Math.round(performance.now() - started) };
   const { warehouse_id, error } = await config();
   if (!warehouse_id) throw new LakeError(error || "No SQL warehouse available", "NO_WAREHOUSE");
 
-  const started = performance.now();
   let res = await call("POST", "/api/2.0/sql/statements", { warehouse_id, statement, wait_timeout: "30s" });
   while (["PENDING", "RUNNING"].includes(res.status?.state)) {
     await new Promise((r) => setTimeout(r, POLL_MS));

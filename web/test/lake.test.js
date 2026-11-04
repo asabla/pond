@@ -70,6 +70,23 @@ test("runSql surfaces MiniLake's error message and code", async () => {
   await assert.rejects(lake.runSql("SELEC 1"), (err) => err instanceof lake.LakeError && err.message === "Parser Error: nope" && err.code === "INVALID_REQUEST");
 });
 
+test("runSql sends CREATE CATALOG and CREATE SCHEMA to Unity Catalog", async () => {
+  const catalogs = [];
+  const schemas = [];
+  routes["GET /api/2.1/unity-catalog/catalogs"] = () => [200, { catalogs: catalogs.map((name) => ({ name })) }];
+  routes["POST /api/2.1/unity-catalog/catalogs"] = (b) => (catalogs.push(b.name), [200, {}]);
+  routes["GET /api/2.1/unity-catalog/schemas"] = () => [200, { schemas: schemas.map((full) => ({ name: full.split(".")[1] })) }];
+  routes["POST /api/2.1/unity-catalog/schemas"] = (b) => (schemas.push(`${b.catalog_name}.${b.name}`), [200, {}]);
+  await lake.runSql("-- set up\nCREATE CATALOG IF NOT EXISTS shop;");
+  await lake.runSql("create catalog if not exists shop");
+  await lake.runSql("CREATE SCHEMA `shop`.raw");
+  const res = await lake.runSql("CREATE SCHEMA IF NOT EXISTS shop.raw");
+  assert.deepEqual(catalogs, ["shop"]);
+  assert.deepEqual(schemas, ["shop.raw"]);
+  assert.deepEqual(res.rows, []);
+  assert.ok(!calls.some((c) => c.path === "/api/2.0/sql/statements"), "no SQL was sent");
+});
+
 test("runSql without a warehouse reports why", async () => {
   routes["GET /pond/config"] = () => [200, { warehouse_id: null, error: "MiniLake unreachable" }];
   await lake.config({ refresh: true });
