@@ -5,6 +5,7 @@ import { registerWebMcp } from "./webmcp.js";
 import { createDataView } from "./views/data.js";
 import { createQueryView } from "./views/query.js";
 import { createJobsView } from "./views/jobs.js";
+import { createGraphView } from "./views/graph.js";
 import { createFilesView } from "./views/files.js";
 import { createAdminView } from "./views/admin.js";
 
@@ -302,6 +303,7 @@ const ui = {
 const views = {
   data: createDataView(ui),
   query: createQueryView(ui),
+  graph: createGraphView(ui),
   jobs: createJobsView(ui),
   files: createFilesView(ui),
   admin: createAdminView(ui),

@@ -83,6 +83,7 @@ export function createQueryView(ui) {
         r.truncated && h("span", { class: "muted" }, "truncated by MiniLake"),
         agent,
         h("span", { class: "spacer" }),
+        r.columns.length > 1 && h("button", { class: "btn ghost", title: "Draw the first two columns as source → target edges", onclick: () => ui.views.graph.openAdhoc({ edges_sql: last.sql }).catch((err) => toast(err.message, "err")) }, "Show as graph"),
         r.columns.length > 0 && h("button", { class: "btn ghost", onclick: () => download("pond-result.csv", toCsv(r), "text/csv") }, "Export CSV")),
       r.columns.length ? grid(r, { max: GRID_MAX_ROWS }) : empty("Statement succeeded."),
     );

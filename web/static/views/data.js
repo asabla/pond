@@ -174,6 +174,7 @@ export function createDataView(ui) {
         actions: [
           action("Drop", () => dropObject("table", t.full_name), "danger-ghost"),
           button("Append file", () => importDialog(null, { catalog: t.catalog_name, schema: t.schema_name, table: t.name, mode: "append" })),
+          columns.length > 1 && button("Open as graph", () => ui.views.graph.newGraph({ edgeTable: t.full_name })),
           button("Query", () => ui.views.query.open(query), "primary"),
         ],
       }),

@@ -65,6 +65,13 @@ test("destructive tools wait for requestUserInteraction when the agent offers it
   assert.equal(asked, 1);
 });
 
+test("graph tools validate their input before touching the page", async () => {
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+  await assert.rejects(byName.open_graph.execute({}), { message: "Give either name or edges_sql." });
+  assert.deepEqual(byName.graph_metrics.inputSchema.properties.metric.enum.slice(0, 2), ["degree", "in_degree"]);
+  assert.ok(byName.graph_metrics.inputSchema.properties.metric.enum.includes("community"));
+});
+
 test("registration wraps tools in MCP content and logs every call", async () => {
   const registered = [];
   globalThis.window = {};

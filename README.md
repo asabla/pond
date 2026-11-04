@@ -130,6 +130,7 @@ Pond prints a warning and the URLs others can use. Anyone who can reach the port
 | --- | --- |
 | **Data** | Browse catalogs → schemas → tables and volumes. Create and drop catalogs, schemas and volumes; drop tables. Import CSV, TSV, JSON, JSON Lines or Parquet into a table by dropping a file anywhere (create, replace or append). Table pages show columns, a preview and storage details. |
 | **Query** | SQL editor (⌘↵ runs, ⌘S saves, ⌘K jumps here), result grid, CSV export, saved queries and the lake's query history. MiniLake runs the DuckDB dialect, not Spark SQL. |
+| **Graph** | Explore relationships in your tables as an interactive network. See [Graphs](#graphs). |
 | **Jobs** | Write and run Python/PySpark scripts once, or save them as jobs and run them again. Runs show status, duration and output. |
 | **Files** | Browse the lake's files (DBFS and `/Volumes`): upload by drag and drop, create folders, download, delete, preview data files as tables, query a file in place or turn it into a table. Browse and edit workspace scripts, and run them. |
 | **Admin** | Context details, SQL warehouses, secret scopes and keys, MiniLake's services, and resetting this context's lake. |
@@ -142,6 +143,27 @@ These come from MiniLake 1.9.0:
 
 - Cancelling a run doesn't stop the script.
 - Run output appears only when the run finishes.
+
+## Graphs
+
+The **Graph** tab draws a network from your tables and analyses it. A graph is defined by SQL:
+
+- **Edges:** a query whose first two columns are the source and target node ids. A column named `weight` weights edges. Other columns become edge attributes.
+- **Nodes (optional):** a query whose first column is the node id. A column named `label` names nodes. Other columns become attributes you can colour by.
+
+Create one with **New graph** (pick an edge table and map its columns), with **Open as graph** on a table page, or with **Show as graph** on any Query result whose first two columns are source and target. Save a graph to reopen it later. Saved graphs are stored in the lake under `/pond/graphs/`.
+
+What you can do with a graph:
+
+- **Size nodes** by degree, in-degree, out-degree, PageRank, betweenness, closeness, eigenvector centrality, HITS hub and authority scores, or clustering coefficient.
+- **Colour nodes** by Louvain community, connected component, strongly connected component, or any node column. The eight largest groups get their own colour, and the rest share "Other".
+- **Find shortest paths** between two nodes. Weights count as distances when the graph has a weight column.
+- **Inspect** a node's attributes, metrics and neighbours, and see graph statistics: density, average degree, components, communities with modularity, average clustering and diameter.
+- **Switch to the table view** to see every node with its metrics, export them as CSV, or save them as a lake table to join in SQL.
+
+Graphs with up to 30,000 edges load in full, and every metric is exact. Bigger graphs open on their 20 best-connected nodes and those nodes' neighbours. Double-click a node to load its neighbours. Metrics then describe the loaded nodes, while shortest paths search the whole graph in SQL, up to 20 hops and ignoring weights.
+
+The graph libraries ([sigma.js](https://www.sigmajs.org) and [graphology](https://graphology.github.io)) ship inside pond and load the first time you open the tab, so graphs work offline. Their licences are in `web/static/vendor/LICENSES.md`.
 
 ## Agents
 
@@ -163,6 +185,7 @@ The page registers its actions as tools on `navigator.modelContext` ([spec](http
 | Data | `list_catalogs`, `list_schemas`, `list_tables`, `describe_table`, `open_table`, `create_catalog`, `create_schema`, `create_volume`, `import_data`, `create_table_from_file`, `drop_object` |
 | Query | `run_sql`, `draft_sql`, `save_query`, `list_saved_queries`, `query_history` |
 | Jobs | `list_jobs`, `list_runs`, `get_run`, `run_script`, `create_job`, `run_job` |
+| Graph | `list_graphs`, `open_graph`, `save_graph`, `graph_metrics`, `graph_stats`, `shortest_path`, `graph_neighbors` |
 | Files | `list_files`, `read_file`, `write_file`, `delete_path`, `list_workspace`, `read_workspace_file`, `write_workspace_file` |
 | Admin | `list_warehouses`, `list_secrets`, `put_secret`, `reset_lake` |
 
@@ -189,8 +212,10 @@ internal/lake/               MiniLake calls pond makes itself: warehouse, SQL, c
 internal/seed/               runs pond-seed/ scripts
 web/static/                  UI: plain HTML/CSS/JS modules, no build step
   lake.js                    MiniLake API client, shared by UI and WebMCP
+  graph.js                   graph definitions, SQL builders and metrics, shared by UI and WebMCP
   app.js                     shell: routing, catalog tree, status, agent activity
-  views/                     data, query, jobs, files, admin
+  views/                     data, query, graph, jobs, files, admin
+  vendor/                    sigma.js and graphology browser builds, with their licences
   webmcp.js                  WebMCP tool definitions
 web/test/                    UI unit tests (node --test, no dependencies)
 ```

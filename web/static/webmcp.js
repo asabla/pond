@@ -3,6 +3,9 @@
 // destructive tools ask the human first.
 // Spec: https://webmachinelearning.github.io/webmcp/
 
+import { FULL_LOAD_EDGES, listGraphs, saveGraph } from "./graph.js";
+import { METRICS, GROUPINGS } from "./views/graph.js";
+
 const DEFAULT_MAX_ROWS = 100;
 const READ_MAX_BYTES = 64 * 1024;
 
@@ -363,6 +366,93 @@ export function buildTools(ui) {
         await lake.importWorkspace(path, source);
         ui.navigate("files", "workspace", ...path.split("/").filter(Boolean));
         return `Saved ${path}.`;
+      },
+    },
+
+    /* ---------- Graph ---------- */
+    {
+      name: "list_graphs",
+      description: "List saved graphs: each is defined by an edge query (first two columns source and target, optional weight column) and an optional node query (first column id, optional label column).",
+      inputSchema: obj(),
+      annotations: READ,
+      execute: async () => listGraphs(lake),
+    },
+    {
+      name: "open_graph",
+      description: `Open a graph in the user's Graph tab, by saved name or by SQL. Up to ${FULL_LOAD_EDGES.toLocaleString()} edges load in full; bigger graphs open on their best-connected nodes and their neighbours (mode "overview"). Returns its size and node attribute columns.`,
+      inputSchema: obj({
+        name: str("A saved graph's name"),
+        edges_sql: str("SQL whose first two columns are source and target node ids; a column named weight weights edges"),
+        nodes_sql: str("Optional SQL whose first column is the node id; a column named label names nodes, others become attributes"),
+        directed: { type: "boolean", default: true, description: "Whether edges have a direction" },
+      }),
+      execute: async ({ name, edges_sql, nodes_sql, directed }) => {
+        if (!name && !edges_sql) throw new Error("Give either name or edges_sql.");
+        ui.navigate("graph");
+        return name ? views.graph.open(name, { byAgent: true }) : views.graph.openAdhoc({ edges_sql, nodes_sql, directed }, { byAgent: true });
+      },
+    },
+    {
+      name: "save_graph",
+      description: "Save a graph definition under a name so it can be reopened from the Graph tab. Replaces a saved graph with the same name.",
+      inputSchema: obj({
+        name: str("Graph name: letters, digits, spaces, dots, dashes, underscores"),
+        edges_sql: str("SQL whose first two columns are source and target node ids"),
+        nodes_sql: str("Optional SQL whose first column is the node id"),
+        directed: { type: "boolean", default: true },
+      }, ["name", "edges_sql"]),
+      execute: async (def) => {
+        const saved = await saveGraph(lake, def);
+        await views.graph.refreshSaved();
+        return saved;
+      },
+    },
+    {
+      name: "graph_metrics",
+      description: "Compute a metric over the open graph's nodes and show it in the page (node size for centralities, colour for groupings). Centralities return the top nodes; groupings return group sizes, plus modularity for communities. Metrics cover the loaded nodes.",
+      inputSchema: obj({
+        metric: { type: "string", enum: [...Object.keys(METRICS), ...Object.keys(GROUPINGS)], description: "degree, in_degree and out_degree count edges; pagerank, betweenness, closeness, eigenvector, hub and authority rank importance; clustering is the local clustering coefficient; community (Louvain), component and strong_component group nodes" },
+        top: { type: "integer", minimum: 1, maximum: 100, default: 10 },
+      }, ["metric"]),
+      annotations: READ,
+      execute: async ({ metric, top = 10 }) => {
+        ui.navigate("graph");
+        const result = await views.graph.ranking(metric, top);
+        await views.graph.style(METRICS[metric] ? { size: metric } : { color: metric });
+        return result;
+      },
+    },
+    {
+      name: "graph_stats",
+      description: "Summary of the open graph: nodes, edges, density, average degree, connected components and any communities, clustering or diameter computed so far.",
+      inputSchema: obj(),
+      annotations: READ,
+      execute: async () => views.graph.stats(),
+    },
+    {
+      name: "shortest_path",
+      description: "Find and highlight a shortest path between two nodes of the open graph. Uses edge weights as distances when the graph has a weight column. In overview mode, nodes not loaded are searched in SQL across the whole graph (ignoring weights). Returns null when there is no path.",
+      inputSchema: obj({
+        from: str("Start node id or label"),
+        to: str("End node id or label"),
+        use_weights: { type: "boolean", default: true },
+      }, ["from", "to"]),
+      annotations: READ,
+      execute: async ({ from, to, use_weights = true }) => {
+        ui.navigate("graph");
+        return views.graph.findPath(from, to, { useWeights: use_weights });
+      },
+    },
+    {
+      name: "graph_neighbors",
+      description: "Select a node in the open graph and return its neighbours (outgoing and incoming when directed). In overview mode, set expand to load its neighbours from the lake first.",
+      inputSchema: obj({ node: str("Node id or label"), expand: { type: "boolean", default: false } }, ["node"]),
+      annotations: READ,
+      execute: async ({ node, expand = false }) => {
+        ui.navigate("graph");
+        if (expand) await views.graph.expand(node);
+        views.graph.select(node);
+        return views.graph.neighbors(node);
       },
     },
 
