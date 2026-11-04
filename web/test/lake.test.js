@@ -1,0 +1,101 @@
+// Unit tests for the MiniLake client. Run with: node --test web/test/
+import { test, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import * as lake from "../static/lake.js";
+
+// A fetch stand-in: routes map "METHOD /path" prefixes to responses; every call is recorded.
+let calls;
+let routes;
+beforeEach(() => {
+  calls = [];
+  routes = {};
+  globalThis.fetch = async (path, init = {}) => {
+    const method = init.method ?? "GET";
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method, path, body });
+    const key = Object.keys(routes).find((k) => `${method} ${path}`.startsWith(k));
+    const [status, data] = key ? routes[key](body, path) : [404, { message: `no route ${method} ${path}` }];
+    return new Response(typeof data === "string" ? data : JSON.stringify(data), { status });
+  };
+});
+
+test("quoteName backtick-quotes each part and escapes backticks", () => {
+  assert.equal(lake.quoteName("shop.raw.orders"), "`shop`.`raw`.`orders`");
+  assert.equal(lake.quoteName("a`b.c"), "`a``b`.`c`");
+});
+
+test("formatOf and tableNameFor read file names", () => {
+  assert.equal(lake.formatOf("orders.CSV"), "csv");
+  assert.equal(lake.formatOf("events.jsonl"), "jsonl");
+  assert.equal(lake.formatOf("notes.txt"), null);
+  assert.match(lake.tableNameFor("Q1 Sales-2024.csv"), /^[a-z0-9_]+$/);
+});
+
+test("volumePath and scriptPath build lake paths", () => {
+  assert.equal(lake.volumePath("shop.raw.imports"), "/Volumes/shop/raw/imports");
+  assert.equal(lake.scriptPath("my job.py"), "/Shared/pond/my_job.py");
+});
+
+test("isRunDone recognises terminal states", () => {
+  for (const s of ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]) assert.ok(lake.isRunDone({ state: { life_cycle_state: s } }));
+  assert.ok(!lake.isRunDone({ state: { life_cycle_state: "RUNNING" } }));
+  assert.ok(!lake.isRunDone(undefined));
+});
+
+test("runSql polls until the statement finishes and maps the result", async () => {
+  let polls = 0;
+  routes["GET /pond/config"] = () => [200, { warehouse_id: "wh1" }];
+  routes["POST /api/2.0/sql/statements"] = () => [200, { statement_id: "s1", status: { state: "RUNNING" } }];
+  routes["GET /api/2.0/sql/statements/s1"] = () =>
+    ++polls < 2
+      ? [200, { statement_id: "s1", status: { state: "RUNNING" } }]
+      : [200, {
+          statement_id: "s1",
+          status: { state: "SUCCEEDED" },
+          manifest: { schema: { columns: [{ name: "n", type_text: "BIGINT" }] } },
+          result: { data_array: [["3"]] },
+        }];
+  await lake.config({ refresh: true });
+  const res = await lake.runSql("SELECT 3 AS n");
+  assert.deepEqual(res.columns, [{ name: "n", type: "BIGINT" }]);
+  assert.deepEqual(res.rows, [["3"]]);
+  assert.equal(res.truncated, false);
+  assert.equal(calls.find((c) => c.method === "POST").body.warehouse_id, "wh1");
+});
+
+test("runSql surfaces MiniLake's error message and code", async () => {
+  routes["GET /pond/config"] = () => [200, { warehouse_id: "wh1" }];
+  routes["POST /api/2.0/sql/statements"] = () => [400, { error_code: "INVALID_REQUEST", message: "Parser Error: nope" }];
+  await lake.config({ refresh: true });
+  await assert.rejects(lake.runSql("SELEC 1"), (err) => err instanceof lake.LakeError && err.message === "Parser Error: nope" && err.code === "INVALID_REQUEST");
+});
+
+test("runSql without a warehouse reports why", async () => {
+  routes["GET /pond/config"] = () => [200, { warehouse_id: null, error: "MiniLake unreachable" }];
+  await lake.config({ refresh: true });
+  await assert.rejects(lake.runSql("SELECT 1"), { message: "MiniLake unreachable", code: "NO_WAREHOUSE" });
+});
+
+test("config is cached until refreshed, and a failure is not cached", async () => {
+  let n = 0;
+  routes["GET /pond/config"] = () => (++n === 1 ? [502, { message: "down" }] : [200, { warehouse_id: `wh${n}` }]);
+  await assert.rejects(lake.config({ refresh: true }));
+  assert.equal((await lake.config()).warehouse_id, "wh2");
+  assert.equal((await lake.config()).warehouse_id, "wh2");
+  assert.equal((await lake.config({ refresh: true })).warehouse_id, "wh3");
+});
+
+test("file API paths encode each segment but keep slashes", async () => {
+  routes["GET /api/2.0/fs/directories/"] = () => [200, { contents: [] }];
+  await lake.listDir("/Volumes/shop/raw/my files#1");
+  assert.equal(calls[0].path, "/api/2.0/fs/directories/Volumes/shop/raw/my%20files%231");
+});
+
+test("importWorkspace sends UTF-8 source as base64", async () => {
+  routes["POST /api/2.0/workspace/mkdirs"] = () => [200, {}];
+  routes["POST /api/2.0/workspace/import"] = () => [200, {}];
+  await lake.importWorkspace("/Shared/pond/hej.py", "print('hej då')");
+  const body = calls.find((c) => c.path.endsWith("/import")).body;
+  assert.equal(Buffer.from(body.content, "base64").toString("utf8"), "print('hej då')");
+  assert.equal(calls[0].body.path, "/Shared/pond");
+});
