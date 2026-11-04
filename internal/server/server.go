@@ -24,12 +24,14 @@ import (
 var proxyPrefixes = []string{"/api/", "/_minilake/", "/mcp"}
 
 type Options struct {
-	Host     string // bind host, accepted in the Host header alongside loopback names
-	Lake     *lake.Client
-	Context  any    // describes the managed context, if any
-	DataRoot string // MiniLake's data directory as SQL sees it; empty when not managed
-	Static   fs.FS
-	Version  string
+	Host string // bind host, accepted in the Host header alongside loopback names
+	// Extra names accepted in the Host header, such as the machine's addresses when shared.
+	AllowedHosts []string
+	Lake         *lake.Client
+	Context      any    // describes the managed context, if any
+	DataRoot     string // MiniLake's data directory as SQL sees it; empty when not managed
+	Static       fs.FS
+	Version      string
 }
 
 type handler struct {
@@ -64,6 +66,9 @@ func New(o Options) http.Handler {
 			},
 		},
 	}
+	for _, name := range o.AllowedHosts {
+		h.allowed[strings.ToLower(strings.Trim(name, "[]"))] = true
+	}
 	if os.Getenv("POND_VERBOSE") != "" {
 		return logging(h)
 	}
@@ -84,7 +89,7 @@ func logging(next http.Handler) http.Handler {
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// MiniLake has no auth; refusing foreign Host headers blocks DNS-rebinding pages
 	// from driving it through Pond.
-	if host := hostname(r.Host); !h.allowed[host] {
+	if host := strings.ToLower(hostname(r.Host)); !h.allowed[host] {
 		sendJSON(w, http.StatusForbidden, map[string]string{
 			"error_code": "FORBIDDEN", "message": fmt.Sprintf("Host %q not allowed", host),
 		})

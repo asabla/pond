@@ -108,6 +108,22 @@ func setup(t *testing.T, context any, dataRoot string) *env {
 	return &env{t, fake, upstream, pond}
 }
 
+func (e *env) client() *lake.Client {
+	c, err := lake.New(e.upstream.URL)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return c
+}
+
+func (e *env) static() fs.FS {
+	static, err := fs.Sub(web.FS, "static")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return static
+}
+
 func (e *env) request(method, path string, body any, headers map[string]string) (*http.Response, []byte) {
 	e.t.Helper()
 	var r io.Reader
@@ -177,6 +193,19 @@ func TestBlocksPathTraversal(t *testing.T) {
 	}
 	if resp, _ := e.request("GET", "/nope.js", nil, nil); resp.StatusCode != 404 {
 		t.Errorf("missing file: status %d", resp.StatusCode)
+	}
+}
+
+func TestAcceptsAllowedHostsWhenShared(t *testing.T) {
+	e := setup(t, nil, "")
+	e.pond.Config.Handler = New(Options{Host: "0.0.0.0", AllowedHosts: []string{"192.168.1.5", "My-Mac.local"}, Lake: e.client(), Static: e.static()})
+	for _, host := range []string{"192.168.1.5:8700", "my-mac.local:8700"} {
+		if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": host}); resp.StatusCode != 200 {
+			t.Errorf("%s: status %d", host, resp.StatusCode)
+		}
+	}
+	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "attacker.example"}); resp.StatusCode != 403 {
+		t.Errorf("attacker: status %d", resp.StatusCode)
 	}
 }
 

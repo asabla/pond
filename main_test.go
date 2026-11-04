@@ -82,3 +82,14 @@ func TestBindFallsBackUnlessExplicit(t *testing.T) {
 		t.Errorf("fell back to %s", strconv.Itoa(got))
 	}
 }
+
+func TestOnlyLoopbackHostsCountAsLocal(t *testing.T) {
+	for host, want := range map[string]bool{
+		"127.0.0.1": true, "localhost": true, "::1": true, "[::1]": true, "127.0.0.2": true,
+		"0.0.0.0": false, "::": false, "192.168.1.5": false, "my-mac.local": false,
+	} {
+		if got := isLoopback(host); got != want {
+			t.Errorf("isLoopback(%q) = %v, want %v", host, got, want)
+		}
+	}
+}

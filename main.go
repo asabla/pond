@@ -195,6 +195,33 @@ func bind(host string, port int, explicit bool) (net.Listener, error) {
 	return nil, fmt.Errorf("No free port for the UI (tried %s): %v", strings.Join(tried, ", "), last)
 }
 
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// machineNames are the names other machines may use to reach this one: its hostname and
+// interface addresses. Accepting only these keeps DNS-rebinding pages out while shared.
+func machineNames() []string {
+	var names []string
+	if h, err := os.Hostname(); err == nil {
+		names = append(names, h)
+		if !strings.Contains(h, ".") {
+			names = append(names, h+".local")
+		}
+	}
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && !n.IP.IsLinkLocalUnicast() {
+			names = append(names, n.IP.String())
+		}
+	}
+	return names
+}
+
 func up(a *args) error {
 	var c *pondctx.Context
 	if a.minilake == "" {
@@ -276,8 +303,14 @@ func up(a *args) error {
 	if described != nil {
 		ctxInfo = described
 	}
+	shared := !isLoopback(a.host)
+	var allowedHosts []string
+	if shared {
+		allowedHosts = machineNames()
+	}
 	srv = &http.Server{Handler: server.New(server.Options{
-		Host: a.host, Lake: client, Context: ctxInfo, DataRoot: dataRoot, Static: static, Version: version,
+		Host: a.host, AllowedHosts: allowedHosts, Lake: client, Context: ctxInfo, DataRoot: dataRoot,
+		Static: static, Version: version,
 	})}
 
 	uiPort := ln.Addr().(*net.TCPAddr).Port
@@ -300,6 +333,16 @@ func up(a *args) error {
 		logf("Ctrl-C stops this context's containers. Data is kept.")
 	} else {
 		logf("  Lake  %s (not managed by pond)", url)
+	}
+	if shared {
+		logf("")
+		logf("! Shared on %s: anyone who can reach port %d can read and change this lake and", a.host, uiPort)
+		logf("  run code in it. MiniLake has no authentication. Use the default host to keep it local.")
+		for _, name := range allowedHosts {
+			if ip := net.ParseIP(name); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				logf("  Others can open http://%s:%d/", name, uiPort)
+			}
+		}
 	}
 	if a.open {
 		openBrowser(ui + "/")
