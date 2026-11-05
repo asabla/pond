@@ -3,6 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as g from "../static/graph.js";
 
+const def0 = { edges_sql: "SELECT * FROM t" };
+
 test("definitions need edge SQL and a safe name, and lose trailing semicolons", () => {
   assert.match(g.validateDefinition({}), /edges_sql/);
   assert.match(g.validateDefinition({ name: "../x", edges_sql: "SELECT 1, 2" }), /names/);
@@ -33,23 +35,39 @@ test("literals keep numbers numeric and escape strings", () => {
 test("SQL builders wrap the edge query and address columns by name", () => {
   const def = { edges_sql: "SELECT * FROM t" };
   const cols = { source: "src", target: "dst" };
-  assert.equal(g.countEdgesSql(def), "SELECT count(*) AS edges FROM (SELECT * FROM t) AS e");
+  assert.equal(g.countEdgesSql(def), "SELECT count(*) AS edges FROM (\nSELECT * FROM t\n) AS e");
   assert.match(g.topNodesSql(def, cols, 5), /e\."src" AS id .*\s+UNION ALL\s+.* e\."dst" AS id .* LIMIT 5$/s);
   assert.match(g.edgesAmongSql(def, cols, [1, "b"]), /e\."src" IN \(1, 'b'\) AND e\."dst" IN \(1, 'b'\)$/);
   assert.match(g.neighborsSql(def, cols, "x", 7), /= 'x' OR e\."dst" = 'x' LIMIT 7$/);
   assert.match(g.edgesTouchingSql(def, cols, [1, 2], 9), /e\."src" IN \(1, 2\) OR e\."dst" IN \(1, 2\) LIMIT 9$/);
-  assert.match(g.frontierSql(def, cols, [1], { directed: true, backward: true }), /SELECT e\."dst" AS a, e\."src" AS b .* WHERE e\."dst" IN \(1\)$/);
+  assert.match(g.frontierSql(def, cols, [1], { directed: true, backward: true }), /SELECT e\."dst" AS a, e\."src" AS b .* WHERE e\."dst" IN \(1\)$/s);
   assert.match(g.nodesSql({ nodes_sql: "SELECT * FROM n" }, { column: "id", values: [1, 2] }), /WHERE n\."id" IN \(1, 2\)$/);
+});
+
+test("a trailing line comment in the user's SQL doesn't swallow the wrapper", () => {
+  const sql = g.countEdgesSql({ edges_sql: "SELECT a, b FROM t -- the edges" });
+  assert.match(sql, /-- the edges\n\) AS e$/);
+  assert.match(g.nodesSql({ nodes_sql: "SELECT * FROM n -- people" }), /-- people\n\) AS n$/);
+});
+
+test("edgeBetweenSql matches one direction, or both when undirected", () => {
+  const c = { source: "s", target: "t" };
+  assert.match(g.edgeBetweenSql(def0, c, 1, "x", true), /WHERE \(e\."s" = 1 AND e\."t" = 'x'\) LIMIT 1$/);
+  assert.match(g.edgeBetweenSql(def0, c, 1, "x", false), /OR \(e\."s" = 'x' AND e\."t" = 1\) LIMIT 1$/);
 });
 
 test("edgeRecords reads source, target, weight and extra attributes", () => {
   const recs = g.edgeRecords({
     columns: [{ name: "s" }, { name: "t" }, { name: "Weight" }, { name: "kind" }],
-    rows: [[1, 2, "2.5", "a"], [2, null, 1, "b"], [3, 1, "oops", "c"]],
+    rows: [[1, 2, "2.5", "a"], [2, null, 1, "b"], [3, 1, "oops", "c"], [4, 5, null, "d"], [5, 6, "", "e"], [6, 7, 0, "f"]],
   });
   assert.deepEqual(recs, [
     { source: 1, target: 2, weight: 2.5, attributes: { kind: "a" } },
     { source: 3, target: 1, weight: 1, attributes: { kind: "c" } },
+    // A missing weight counts as 1, not 0; an explicit 0 stays 0.
+    { source: 4, target: 5, weight: 1, attributes: { kind: "d" } },
+    { source: 5, target: 6, weight: 1, attributes: { kind: "e" } },
+    { source: 6, target: 7, weight: 0, attributes: { kind: "f" } },
   ]);
   assert.throws(() => g.edgeRecords({ columns: [{ name: "only" }], rows: [] }), /two columns/);
 });

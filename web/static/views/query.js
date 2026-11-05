@@ -1,5 +1,5 @@
 // Query: SQL editor, results, saved queries and the lake's query history.
-import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, fmtTime, fmtDuration } from "../dom.js";
+import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, fmtTime, fmtDuration, guard } from "../dom.js";
 
 const GRID_MAX_ROWS = 1000;
 const DRAFT_KEY = "pond.draft";
@@ -10,7 +10,7 @@ export function createQueryView(ui) {
 
   const editor = h("textarea", { class: "editor", spellcheck: "false", autocomplete: "off", "aria-label": "SQL editor", placeholder: "SELECT * FROM catalog.schema.table LIMIT 100" });
   const runBtn = h("button", { class: "btn primary", onclick: () => runEditor() }, "Run ", h("kbd", {}, "⌘↵"));
-  const saveBtn = h("button", { class: "btn", onclick: () => save() }, "Save");
+  const saveBtn = h("button", { class: "btn", onclick: guard(() => save()) }, "Save");
   const savedLabel = h("span", { class: "muted saved-label" });
   const results = h("div", { class: "results" });
   const panelBody = h("div", { class: "panel-body" });
@@ -124,12 +124,12 @@ export function createQueryView(ui) {
         panelBody.replaceChildren(...(queries.length ? queries.map((sq) => h("div", { class: "panel-item" },
           h("button", { class: "panel-open", title: sq.query_text, onclick: () => setSql(sq.query_text, { savedId: sq.id, name: sq.display_name }) },
             h("b", {}, sq.display_name), h("code", {}, sq.query_text.replace(/\s+/g, " "))),
-          h("button", { class: "icon-btn small", title: "Delete", "aria-label": `Delete ${sq.display_name}`, onclick: async () => {
+          h("button", { class: "icon-btn small", title: "Delete", "aria-label": `Delete ${sq.display_name}`, onclick: guard(async () => {
             if (!(await confirmDialog({ title: `Delete “${sq.display_name}”?`, body: "The saved query is removed from this context." }))) return;
             await lake.deleteQuery(sq.id);
             if (state.savedId === sq.id) setSql(editor.value);
             renderPanel();
-          } }, "×"))) : [empty("No saved queries. Write one and press Save (⌘S).")]));
+          }) }, "×"))) : [empty("No saved queries. Write one and press Save (⌘S).")]));
       } else {
         const history = await lake.queryHistory(50);
         panelBody.replaceChildren(...(history.length ? history.map((e) => h("div", { class: "panel-item" },
@@ -159,6 +159,7 @@ export function createQueryView(ui) {
     },
     setSql,
     runEditor,
+    running: () => state.running,
     save,
     snapshot: () => ({
       editor_sql: editor.value,

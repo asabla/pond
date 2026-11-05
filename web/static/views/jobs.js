@@ -24,8 +24,8 @@ const statusBadge = (run) => {
   const s = runStatus(run);
   return h("span", { class: `status-badge ${s.tone}` }, s.tone === "warn" && h("span", { class: "loading" }), s.label);
 };
-const runDuration = (r) => fmtDuration((r.end_time || (r.start_time && Date.now())) - r.start_time);
-const splitParams = (text) => (text ? text.match(/"[^"]*"|\S+/g).map((p) => p.replace(/^"|"$/g, "")) : []);
+const runDuration = (r) => (r.start_time ? fmtDuration((r.end_time || Date.now()) - r.start_time) : "");
+export const splitParams = (text) => (text?.match(/"[^"]*"|\S+/g) ?? []).map((p) => p.replace(/^"|"$/g, ""));
 const joinParams = (params) => (params ?? []).map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(" ");
 
 export function createJobsView(ui) {
@@ -96,7 +96,10 @@ export function createJobsView(ui) {
     const name = job.settings?.name ?? `Job ${id}`;
     const editor = h("textarea", { class: "editor code-editor", spellcheck: "false", "aria-label": "Script" }, source ?? "");
     const params = h("input", { class: "input mono", value: joinParams(task?.parameters), placeholder: "Arguments passed to the script", "aria-label": "Parameters" });
+    // Saving writes the editor over the script, so only offer it when the script loaded.
+    const editable = Boolean(task?.python_file) && source != null;
     const saveJob = () => lake.updateJob(id, { name, file: task.python_file, source: editor.value, parameters: splitParams(params.value) });
+    const runsBox = h("div", {}, section("Runs", runs.length, runsTable(runs)));
 
     page(
       h("div", { class: "crumbs" }, h("a", { href: "#/jobs" }, "jobs")),
@@ -107,12 +110,12 @@ export function createJobsView(ui) {
           toast(`Deleted job ${name}`);
           ui.navigate("jobs");
         }, "danger-ghost"),
-        action("Save", async () => {
+        editable && action("Save", async () => {
           await saveJob();
           toast("Saved");
         }),
-        action("Save & run", async () => {
-          await saveJob();
+        action(editable ? "Save & run" : "Run", async () => {
+          if (editable) await saveJob();
           const { run_id } = await lake.runNow(id);
           ui.navigate("jobs", "run", run_id);
         }, "primary"),
@@ -120,9 +123,21 @@ export function createJobsView(ui) {
       h("p", { class: "context-dir mono" }, task?.python_file ?? "No Python task"),
       section("Script", null, source == null ? errorBox("Could not load the script from the workspace.") : editor),
       section("Parameters", null, params),
-      section("Runs", runs.length, runsTable(runs)),
+      runsBox,
     );
-    if (runs.some((r) => !lake.isRunDone(r))) poll(live);
+    // Refresh only the runs while one is going, so edits to the script and parameters survive.
+    const refreshRuns = (list) => {
+      if (!list.some((r) => !lake.isRunDone(r))) return;
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(async () => {
+        if (!live() || el.hidden) return;
+        const next = await lake.listRuns({ jobId: id, limit: 25 }).catch(() => list);
+        if (!live()) return;
+        runsBox.replaceChildren(section("Runs", next.length, runsTable(next)));
+        refreshRuns(next);
+      }, POLL_MS);
+    };
+    refreshRuns(runs);
   }
 
   async function runPage(id, live) {

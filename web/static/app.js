@@ -23,8 +23,16 @@ const state = {
 
 // Routes are #/<view>/<part>/<part>…; parts are URI-encoded one by one.
 function parseRoute() {
-  const [view, ...parts] = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
-  return { view: views[view] ? view : "data", parts };
+  // A hand-typed hash can hold a stray "%"; keep such a part as typed rather than failing.
+  const decode = (p) => {
+    try {
+      return decodeURIComponent(p);
+    } catch {
+      return p;
+    }
+  };
+  const [view, ...parts] = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decode);
+  return { view: Object.hasOwn(views, view ?? "") ? view : "data", parts };
 }
 
 export function navigate(view, ...parts) {
@@ -96,7 +104,10 @@ async function connect() {
   await loadStatus();
   if (state.offline) {
     tree.catalogs = [];
-    render();
+    // Re-render the view only when going offline; on later retries that would reset
+    // the page (and steal the editor's focus) every few seconds.
+    if (wasOffline) renderTree();
+    else render();
     retryTimer = setTimeout(connect, RETRY_MS);
     return;
   }

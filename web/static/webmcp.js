@@ -12,7 +12,12 @@ const READ_MAX_BYTES = 64 * 1024;
 const text = (data) => ({ content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }] });
 const fail = (message) => ({ content: [{ type: "text", text: message }], isError: true });
 
-const capRows = (rows, max) => ({
+// Schemas are advice to the agent, so clamp here too: a negative max would slice from the end.
+const capRows = (rows, maxRows) => {
+  const max = Math.min(1000, Math.max(0, Math.trunc(Number(maxRows)) || 0));
+  return capped(rows, max);
+};
+const capped = (rows, max) => ({
   rows: rows.slice(0, max),
   row_count: rows.length,
   ...(rows.length > max && { note: `Only the first ${max} of ${rows.length} rows are included; raise max_rows or aggregate in SQL.` }),
@@ -205,6 +210,9 @@ export function buildTools(ui) {
       }, ["sql"]),
       annotations: { destructiveHint: true },
       execute: async ({ sql, max_rows = DEFAULT_MAX_ROWS }) => {
+        if (typeof sql !== "string" || !sql.trim()) throw new Error("sql must be a non-empty SQL statement.");
+        // Check before touching the editor, so a refused call leaves the user's SQL alone.
+        if (views.query.running()) throw new Error("Another query is still running in the editor.");
         views.query.setSql(sql);
         ui.navigate("query");
         const out = await views.query.runEditor({ byAgent: true });

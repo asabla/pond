@@ -101,6 +101,15 @@ export function snippet(text) {
 export const button = (label, onclick, kind = "") => h("button", { class: `btn ${kind}`, onclick }, label);
 
 // Wraps an async action: disables the button while running and shows failures as a toast.
+// Wraps an event handler so a failure shows as a toast instead of vanishing.
+export const guard = (fn) => async (...args) => {
+  try {
+    return await fn(...args);
+  } catch (err) {
+    toast(err.message, "err");
+  }
+};
+
 export function action(label, fn, kind = "") {
   const btn = h("button", {
     class: `btn ${kind}`,

@@ -62,13 +62,15 @@ export function literal(value) {
 }
 
 const list = (values) => values.map(literal).join(", ");
-const edges = (def) => `(${def.edges_sql}) AS e`;
+// The newlines keep a trailing `-- comment` in the user's SQL from swallowing the ")".
+const wrap = (sql) => `(\n${sql}\n)`;
+const edges = (def) => `${wrap(def.edges_sql)} AS e`;
 
 export const countEdgesSql = (def) => `SELECT count(*) AS edges FROM ${edges(def)}`;
 export const columnsSql = (def) => `SELECT * FROM ${edges(def)} LIMIT 0`;
 export const loadEdgesSql = (def, limit) => `SELECT * FROM ${edges(def)} LIMIT ${limit}`;
 export const nodesSql = (def, ids) =>
-  `SELECT * FROM (${def.nodes_sql}) AS n${ids ? ` WHERE n.${quoteIdent(ids.column)} IN (${list(ids.values)})` : ""}`;
+  `SELECT * FROM ${wrap(def.nodes_sql)} AS n${ids ? ` WHERE n.${quoteIdent(ids.column)} IN (${list(ids.values)})` : ""}`;
 
 export function topNodesSql(def, { source, target }, n = OVERVIEW_SEEDS) {
   return `SELECT id, count(*) AS degree FROM (
@@ -91,6 +93,14 @@ export function edgesTouchingSql(def, { source, target }, ids, limit = OVERVIEW_
 export function neighborsSql(def, { source, target }, id, limit = NEIGHBOR_LIMIT) {
   const v = literal(id);
   return `SELECT * FROM ${edges(def)} WHERE e.${quoteIdent(source)} = ${v} OR e.${quoteIdent(target)} = ${v} LIMIT ${limit}`;
+}
+
+// The edge from a to b (either way round when undirected), to draw one step of a path.
+export function edgeBetweenSql(def, { source, target }, a, b, directed) {
+  const s = `e.${quoteIdent(source)}`;
+  const t = `e.${quoteIdent(target)}`;
+  const [la, lb] = [literal(a), literal(b)];
+  return `SELECT * FROM ${edges(def)} WHERE (${s} = ${la} AND ${t} = ${lb})${directed ? "" : ` OR (${s} = ${lb} AND ${t} = ${la})`} LIMIT 1`;
 }
 
 // One breadth-first step: edges leaving (forward) or entering (backward) the frontier.
@@ -116,7 +126,9 @@ export function edgeRecords({ columns, rows }) {
   const out = [];
   for (const row of rows) {
     if (row[0] == null || row[1] == null) continue;
-    const weight = weightAt >= 0 ? Number(row[weightAt]) : 1;
+    // NULL or empty means no weight (1); Number() would turn both into 0.
+    const raw = weightAt >= 0 ? row[weightAt] : null;
+    const weight = raw == null || raw === "" ? 1 : Number(raw);
     out.push({
       source: row[0],
       target: row[1],

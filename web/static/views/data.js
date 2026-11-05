@@ -1,5 +1,5 @@
 // Data: catalogs → schemas → tables and volumes. Create, drop, preview, and import files.
-import { h, grid, table, action, button, snippet, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtBytes } from "../dom.js";
+import { h, grid, table, action, button, snippet, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtBytes, guard } from "../dom.js";
 
 const PREVIEW_ROWS = 100;
 const NAME = "^[A-Za-z_][A-Za-z0-9_]*$";
@@ -23,7 +23,7 @@ export function createDataView(ui) {
     e.preventDefault();
     el.classList.remove("dropping");
     const file = e.dataTransfer.files[0];
-    if (file) importDialog(file);
+    if (file) guard(importDialog)(file);
   });
 
   const page = (...children) => el.replaceChildren(h("div", { class: "page" }, ...children));
@@ -73,7 +73,7 @@ export function createDataView(ui) {
         title: ctx ? ctx.name : "Your lake",
         badges: [ctx && { text: "context", accent: true }],
         sub: ctx?.dir,
-        actions: [button("Import file", () => importDialog()), button("New catalog", newCatalog, "primary")],
+        actions: [button("Import file", guard(() => importDialog())), button("New catalog", newCatalog, "primary")],
       }),
       h("p", { class: "lede" }, "Catalogs hold schemas, which hold tables and volumes. Drop a CSV, JSON or Parquet file anywhere here to turn it into a table."),
       section("Catalogs", catalogs.length,
@@ -130,7 +130,7 @@ export function createDataView(ui) {
         actions: [
           action("Delete schema", () => dropObject("schema", fullName), "danger-ghost"),
           button("New volume", () => newVolume(c, s)),
-          button("Import file", () => importDialog(null, { catalog: c, schema: s }), "primary"),
+          button("Import file", guard(() => importDialog(null, { catalog: c, schema: s })), "primary"),
         ],
       }),
       section("Tables", tables.length, table(tables, [
@@ -173,7 +173,7 @@ export function createDataView(ui) {
         badges: [t.table_type, t.data_source_format && { text: t.data_source_format, accent: true }, byAgent && { text: "opened by agent" }],
         actions: [
           action("Drop", () => dropObject("table", t.full_name), "danger-ghost"),
-          button("Append file", () => importDialog(null, { catalog: t.catalog_name, schema: t.schema_name, table: t.name, mode: "append" })),
+          button("Append file", guard(() => importDialog(null, { catalog: t.catalog_name, schema: t.schema_name, table: t.name, mode: "append" }))),
           columns.length > 1 && button("Open as graph", () => ui.views.graph.newGraph({ edgeTable: t.full_name })),
           button("Query", () => ui.views.query.open(query), "primary"),
         ],

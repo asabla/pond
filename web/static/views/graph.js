@@ -1,7 +1,7 @@
 // Graph: network analytics over lake tables. Draws a graph defined by SQL with sigma.js,
 // computes metrics with graphology, and finds paths. Graphs too big to load open on their
 // best-connected nodes and grow by expanding nodes; paths then come from SQL.
-import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading } from "../dom.js";
+import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, guard } from "../dom.js";
 import * as G from "../graph.js";
 
 // replaceChildren, skipping the null and false a conditional child leaves behind.
@@ -66,8 +66,12 @@ function theme() {
   };
 }
 
+// Thrown inside a graph load that a newer load replaced.
+const STALE = Symbol("stale graph load");
+
 export function createGraphView(ui) {
   const { lake } = ui;
+  let loadSeq = 0;
   const s = {
     def: null, // the graph definition being shown
     mode: null, // "full" | "overview"
@@ -113,11 +117,19 @@ export function createGraphView(ui) {
     const norm = G.normalize(def);
     if (norm.name && location.hash !== `#/graph/${encodeURIComponent(norm.name)}`) history.replaceState(null, "", `#/graph/${encodeURIComponent(norm.name)}`);
     teardown();
+    // A newer open() (the user switching graphs, or an agent) makes this one stale: it
+    // checks after every await and stops before touching the newer graph.
+    const load = ++loadSeq;
+    const live = () => {
+      if (load !== loadSeq) throw STALE;
+    };
     Object.assign(s, { def: norm, graph: null, mode: null, metrics: {}, groups: {}, diameter: null, selected: null, path: null, error: null, loading: "Loading graph…", byAgent });
     render();
     try {
       const { Graph } = await loadLibs();
+      live();
       const head = await lake.runSql(G.columnsSql(norm));
+      live();
       if (head.columns.length < 2) throw new Error("The edge query needs at least two columns: source and target.");
       s.columns = {
         source: head.columns[0].name,
@@ -125,26 +137,42 @@ export function createGraphView(ui) {
         weighted: head.columns.some((c, i) => i > 1 && c.name.toLowerCase() === "weight"),
         numeric: /INT|LONG|SHORT|BYTE|DECIMAL|DOUBLE|FLOAT|REAL|NUMERIC/i.test(head.columns[0].type ?? ""),
       };
-      s.totalEdges = Number((await lake.runSql(G.countEdgesSql(norm))).rows[0]?.[0] ?? 0);
+      const total = Number((await lake.runSql(G.countEdgesSql(norm))).rows[0]?.[0] ?? 0);
+      live();
+      s.totalEdges = total;
       s.graph = new Graph({ type: norm.directed ? "directed" : "undirected", allowSelfLoops: true });
       if (s.totalEdges <= G.FULL_LOAD_EDGES) {
         s.mode = "full";
-        addEdges(G.edgeRecords(await lake.runSql(G.loadEdgesSql(norm, G.FULL_LOAD_EDGES))));
-        if (norm.nodes_sql) addNodes(G.nodeRecords(await lake.runSql(G.nodesSql(norm))), { onlyExisting: false });
+        const edgeRows = await lake.runSql(G.loadEdgesSql(norm, G.FULL_LOAD_EDGES));
+        live();
+        addEdges(G.edgeRecords(edgeRows));
+        if (norm.nodes_sql) {
+          const nodeRows = await lake.runSql(G.nodesSql(norm));
+          live();
+          addNodes(G.nodeRecords(nodeRows), { onlyExisting: false });
+        }
       } else {
         s.mode = "overview";
         // The best-connected nodes with their neighbours, then every edge among those nodes.
         const top = (await lake.runSql(G.topNodesSql(norm, s.columns))).rows.map((r) => r[0]);
+        live();
         for (const id of top) ensureNode(id);
-        addEdges(G.edgeRecords(await lake.runSql(G.edgesTouchingSql(norm, s.columns, top))));
+        const touching = await lake.runSql(G.edgesTouchingSql(norm, s.columns, top));
+        live();
+        addEdges(G.edgeRecords(touching));
         const loaded = s.graph.nodes().map((n) => s.graph.getNodeAttribute(n, "raw"));
-        addEdges(G.edgeRecords(await lake.runSql(`${G.edgesAmongSql(norm, s.columns, loaded)} LIMIT ${G.FULL_LOAD_EDGES}`)));
+        const among = await lake.runSql(`${G.edgesAmongSql(norm, s.columns, loaded)} LIMIT ${G.FULL_LOAD_EDGES}`);
+        live();
+        addEdges(G.edgeRecords(among));
         await loadNodeAttributes(loaded);
+        live();
       }
       s.loading = null;
       await draw();
+      live();
       return summary();
     } catch (err) {
+      if (err === STALE) throw new Error("Another graph was opened before this one finished loading.");
       s.loading = null;
       s.error = err.message;
       render();
@@ -184,9 +212,11 @@ export function createGraphView(ui) {
   }
 
   async function loadNodeAttributes(ids) {
+    const graph = s.graph;
     if (!s.def.nodes_sql || !ids.length) return;
     const head = await lake.runSql(`${G.nodesSql(s.def)} LIMIT 0`);
-    addNodes(G.nodeRecords(await lake.runSql(G.nodesSql(s.def, { column: head.columns[0].name, values: ids }))));
+    const rows = await lake.runSql(G.nodesSql(s.def, { column: head.columns[0].name, values: ids }));
+    if (s.graph === graph) addNodes(G.nodeRecords(rows));
   }
 
   // Overview mode: pull in a node's neighbours from SQL.
@@ -194,11 +224,14 @@ export function createGraphView(ui) {
     if (s.mode !== "overview" || !s.graph.hasNode(key)) return 0;
     const before = s.graph.order;
     const { x, y } = s.graph.getNodeAttributes(key);
+    const graph = s.graph;
     const records = G.edgeRecords(await lake.runSql(G.neighborsSql(s.def, s.columns, s.graph.getNodeAttribute(key, "raw"))));
+    if (s.graph !== graph) return 0; // another graph was opened meanwhile
     addEdges(records);
     const added = s.graph.nodes().slice(before);
     for (const n of added) s.graph.mergeNodeAttributes(n, { x: x + (Math.random() - 0.5) * 0.1, y: y + (Math.random() - 0.5) * 0.1 });
     await loadNodeAttributes(added.map((n) => s.graph.getNodeAttribute(n, "raw")));
+    if (s.graph !== graph) return 0;
     s.metrics = {};
     s.groups = {};
     await restyle();
@@ -210,7 +243,10 @@ export function createGraphView(ui) {
   /* ---------- Metrics ---------- */
 
   function rawId(key) {
-    return s.graph?.hasNode(key) ? s.graph.getNodeAttribute(key, "raw") : s.columns?.numeric && Number.isFinite(Number(key)) ? Number(key) : key;
+    if (s.graph?.hasNode(key)) return s.graph.getNodeAttribute(key, "raw");
+    // Only use a number when it round-trips: a BIGINT id past 2^53 stays a string,
+    // which DuckDB casts to the column's type when comparing.
+    return s.columns?.numeric && String(Number(key)) === key ? Number(key) : key;
   }
 
   // Only a weight column makes a graph weighted; repeated rows alone don't.
@@ -324,6 +360,9 @@ export function createGraphView(ui) {
   async function findPath(fromId, toId, { useWeights = true } = {}) {
     const from = G.keyOf(fromId);
     const to = G.keyOf(toId);
+    const graph = s.graph;
+    const stale = () => s.graph !== graph;
+    const gone = () => new Error("Another graph was opened while the path search ran.");
     let keys;
     if (s.graph.hasNode(from) && s.graph.hasNode(to)) {
       const { lib } = await loadLibs();
@@ -333,14 +372,17 @@ export function createGraphView(ui) {
     if (!keys && s.mode === "overview") {
       // Not connected among the loaded nodes: search the whole graph in SQL.
       const raw = await G.sqlShortestPath({ runSql: lake.runSql, def: s.def, columns: s.columns, from: rawId(from), to: rawId(to), directed: s.def.directed });
+      if (stale()) throw gone();
       if (raw) {
         const before = s.graph.order;
         for (let i = 0; i + 1 < raw.length; i++) {
           const [a, b] = [raw[i], raw[i + 1]];
-          const fwd = await lake.runSql(`SELECT * FROM (${s.def.edges_sql}) AS e WHERE e.${G.quoteIdent(s.columns.source)} = ${G.literal(a)} AND e.${G.quoteIdent(s.columns.target)} = ${G.literal(b)}${s.def.directed ? "" : ` OR e.${G.quoteIdent(s.columns.source)} = ${G.literal(b)} AND e.${G.quoteIdent(s.columns.target)} = ${G.literal(a)}`} LIMIT 1`);
+          const fwd = await lake.runSql(G.edgeBetweenSql(s.def, s.columns, a, b, s.def.directed));
+          if (stale()) throw gone();
           addEdges(G.edgeRecords(fwd));
         }
         await loadNodeAttributes(s.graph.nodes().slice(before).map((n) => s.graph.getNodeAttribute(n, "raw")));
+        if (stale()) throw gone();
         keys = raw.map(G.keyOf);
         placeAlong(keys, new Set(s.graph.nodes().slice(before)));
         s.metrics = {};
@@ -593,7 +635,7 @@ export function createGraphView(ui) {
     const search = h("input", { class: "input graph-search", type: "search", placeholder: "Find node…", list: "graph-nodes", "aria-label": "Find node" });
     search.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
-      const key = findNode(search.value.trim());
+      const key = findNode(search.value.trim(), { fuzzy: true });
       if (key) select(key, { center: true });
       else toast(`No node “${search.value}” in the loaded graph.`, "err");
     });
@@ -601,8 +643,8 @@ export function createGraphView(ui) {
       h("select", { class: "graph-pick", "aria-label": "Saved graphs", onchange: (e) => e.target.value && ui.navigate("graph", e.target.value) },
         h("option", { value: "", selected: !s.def?.name }, s.def && !s.def.name ? "Unsaved graph" : "Saved graphs…"),
         s.saved.map((g) => h("option", { value: g.name, selected: g.name === s.def?.name }, g.name))),
-      h("button", { class: "btn", onclick: () => newGraph() }, "New graph"),
-      s.def && h("button", { class: "btn", onclick: () => saveDialog() }, s.def.name ? "Edit" : "Save…"),
+      h("button", { class: "btn", onclick: guard(() => newGraph()) }, "New graph"),
+      s.def && h("button", { class: "btn", onclick: guard(() => saveDialog()) }, s.def.name ? "Edit" : "Save…"),
       s.graph && [
         h("span", { class: "graph-sep" }),
         select_("Size", s.size, sizeOptions, async (v) => {
@@ -652,11 +694,15 @@ export function createGraphView(ui) {
     }
   }
 
-  function findNode(text) {
+  // An id, then an exact label (any case). With fuzzy, then a label containing the text:
+  // only for people typing, so an id like "5" never lands on a loaded "Node 55".
+  function findNode(text, { fuzzy = false } = {}) {
     if (!text || !s.graph) return null;
     if (s.graph.hasNode(text)) return text;
     const lower = text.toLowerCase();
-    return s.graph.findNode((_, a) => String(a.label).toLowerCase() === lower) ?? s.graph.findNode((_, a) => String(a.label).toLowerCase().includes(lower)) ?? null;
+    return s.graph.findNode((_, a) => String(a.label).toLowerCase() === lower)
+      ?? (fuzzy ? s.graph.findNode((_, a) => String(a.label).toLowerCase().includes(lower)) : null)
+      ?? null;
   }
 
   function renderStatus() {
@@ -754,26 +800,30 @@ export function createGraphView(ui) {
         [...metricRows, ...groupRows].map(([k, v]) => [h("dt", {}, k), h("dd", {}, v == null ? "—" : fmt(v))])),
       h("div", { class: "graph-actions" },
         s.mode === "overview" && h("button", { class: "btn", onclick: () => expand(key).then((n) => toast(n ? `Added ${n} nodes` : "No new neighbours")) }, "Expand"),
-        h("button", { class: "btn", onclick: () => ((pathForm.from = a.label), (s.panel = "path"), renderPanel()) }, "Path from here"),
-        h("button", { class: "btn", onclick: () => ((pathForm.to = a.label), (s.panel = "path"), renderPanel()) }, "Path to here"),
+        h("button", { class: "btn", onclick: () => (Object.assign(pathForm, { from: a.label, fromKey: key }), (s.panel = "path"), renderPanel()) }, "Path from here"),
+        h("button", { class: "btn", onclick: () => (Object.assign(pathForm, { to: a.label, toKey: key }), (s.panel = "path"), renderPanel()) }, "Path to here"),
         h("button", { class: "btn ghost", onclick: () => ui.views.query.open(G.neighborsSql(s.def, s.columns, a.raw, 1000)) }, "Edges in SQL")),
       g.type === "directed"
         ? [nbrList("Outgoing", g.outNeighbors(key)), nbrList("Incoming", g.inNeighbors(key))]
         : nbrList("Neighbours", g.neighbors(key)));
   }
 
-  const pathForm = { from: "", to: "" };
+  // fromKey/toKey remember the node picked with "Path from/to here", since labels can repeat.
+  const pathForm = { from: "", to: "", fromKey: null, toKey: null };
 
   function renderPathPanel() {
     const from = h("input", { class: "input", list: "graph-nodes", value: pathForm.from, placeholder: "From node", "aria-label": "From node" });
     const to = h("input", { class: "input", list: "graph-nodes", value: pathForm.to, placeholder: "To node", "aria-label": "To node" });
     const useWeights = h("input", { type: "checkbox", checked: true });
-    const resolve = (text) => findNode(text) ?? (s.mode === "overview" && text ? text : null);
+    // In overview mode an unknown id goes to the SQL search rather than a fuzzy label match.
+    const resolve = (text, key, typed) => (key && text === typed && s.graph?.hasNode(key) ? key : null)
+      ?? findNode(text, { fuzzy: s.mode !== "overview" })
+      ?? (s.mode === "overview" && text ? text : null);
     const go = async () => {
+      const a = resolve(from.value.trim(), pathForm.fromKey, pathForm.from);
+      const b = resolve(to.value.trim(), pathForm.toKey, pathForm.to);
       pathForm.from = from.value.trim();
       pathForm.to = to.value.trim();
-      const a = resolve(pathForm.from);
-      const b = resolve(pathForm.to);
       if (!a || !b) return toast(`Can't find ${!a ? pathForm.from || "the start" : pathForm.to || "the end"} in the graph.`, "err");
       try {
         await busy(() => findPath(a, b, { useWeights: useWeights.checked }));
@@ -829,7 +879,7 @@ export function createGraphView(ui) {
         h("span", { class: "muted" }, s.metrics[s.size] ? `sorted by ${METRICS[s.size].label}` : "sorted by degree"),
         h("span", { class: "spacer" }),
         h("button", { class: "btn ghost", onclick: () => download(`${s.def.name ?? "graph"}-nodes.csv`, toCsv(tableData()), "text/csv") }, "Export CSV"),
-        h("button", { class: "btn", onclick: () => saveMetricsDialog() }, "Save as table…")),
+        h("button", { class: "btn", onclick: guard(() => saveMetricsDialog()) }, "Save as table…")),
       grid(data, { max: TABLE_ROWS }));
   }
 
@@ -852,7 +902,7 @@ export function createGraphView(ui) {
       return;
     }
     if (s.error) {
-      put(stage, h("div", { class: "graph-empty" }, errorBox(s.error), h("div", { class: "graph-actions" }, s.def && h("button", { class: "btn", onclick: () => saveDialog() }, "Edit definition"))));
+      put(stage, h("div", { class: "graph-empty" }, errorBox(s.error), h("div", { class: "graph-actions" }, s.def && h("button", { class: "btn", onclick: guard(() => saveDialog()) }, "Edit definition"))));
       return;
     }
     if (!s.graph) {
@@ -860,7 +910,7 @@ export function createGraphView(ui) {
         h("h1", {}, "Graph"),
         h("p", { class: "lede" }, "Explore relationships in your tables as a network: who connects to whom, which nodes matter most, which groups form and how things are linked."),
         h("p", { class: "help" }, "A graph comes from an edge table (or any SQL) with a source and a target column, and optionally a node table for labels and attributes."),
-        h("div", { class: "graph-actions" }, h("button", { class: "btn primary", onclick: () => newGraph() }, "New graph from tables"), h("button", { class: "btn", onclick: () => sqlDialog() }, "New graph from SQL")),
+        h("div", { class: "graph-actions" }, h("button", { class: "btn primary", onclick: guard(() => newGraph()) }, "New graph from tables"), h("button", { class: "btn", onclick: guard(() => sqlDialog()) }, "New graph from SQL")),
         s.saved.length > 0 && [h("h2", {}, "Saved graphs"), h("ul", { class: "graph-saved" }, s.saved.map((g) => h("li", {}, h("a", { href: `#/graph/${encodeURIComponent(g.name)}` }, g.name), h("small", { class: "muted" }, g.directed ? " directed" : " undirected"))))]));
       return;
     }
