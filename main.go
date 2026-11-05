@@ -379,7 +379,10 @@ func up(a *args) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	uiPort := ln.Addr().(*net.TCPAddr).Port
+	uiPort := port
+	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
+		uiPort = addr.Port
+	}
 	if c != nil && !a.portExplicit && port != uiPort && port == c.PreferredPort() {
 		logf("! Port %d, where this context usually runs, is in use; using %d for this run.", port, uiPort)
 		logf("  MCP clients registered at port %d won't reach it. Re-register with the command below,", port)

@@ -98,7 +98,7 @@ func (f *fixture) calls() [][]string {
 		return nil
 	}
 	var out [][]string
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(b)), "\n") {
 		var call []string
 		if json.Unmarshal([]byte(line), &call) == nil {
 			out = append(out, call)

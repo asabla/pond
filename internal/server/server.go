@@ -46,7 +46,10 @@ type handler struct {
 // MiniLake for /api, /_minilake and /mcp. It refuses requests for unknown hosts.
 func New(o Options) http.Handler {
 	target := o.Lake.Target()
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = dt.Clone()
+	}
 	transport.DisableCompression = true // pass bodies through untouched
 	transport.ResponseHeaderTimeout = 300 * time.Second
 	h := &handler{

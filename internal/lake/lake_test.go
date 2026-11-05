@@ -28,6 +28,7 @@ type fakeLake struct {
 }
 
 func newFake(t *testing.T) (*fakeLake, *Client) {
+	t.Helper()
 	pollInterval, runPollInterval = time.Millisecond, time.Millisecond
 	f := &fakeLake{catalogs: map[string]bool{}, statements: map[string]int{}, polls: map[string]int{}, runResult: "SUCCESS"}
 	srv := httptest.NewServer(f)

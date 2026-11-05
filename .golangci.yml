@@ -8,16 +8,22 @@ linters:
     - contextcheck # contexts are passed on, not replaced
     - copyloopvar
     - errorlint # errors are compared with errors.Is/As and wrapped with %w
+    - forcetypeassert # unchecked type assertions panic
     - gocritic
     - gosec
     - misspell
+    - modernize # newer standard library helpers (slices, strings iterators, ...)
     - nilerr # no `return nil` right after checking err != nil
     - noctx # HTTP requests carry a context
+    - nolintlint # every //nolint names its linter and still suppresses something
     - revive
+    - thelper # test helpers call t.Helper(), so failures point at the caller
     - unconvert
     - unparam
     - usestdlibvars
   settings:
+    nolintlint:
+      require-specific: true
     govet:
       enable-all: true
       disable:
@@ -64,7 +70,7 @@ linters:
       - std-error-handling
     rules:
       - path: _test\.go
-        linters: [errcheck, gosec, noctx, bodyclose, unparam]
+        linters: [errcheck, gosec, noctx, bodyclose, unparam, forcetypeassert]
 
 formatters:
   enable:

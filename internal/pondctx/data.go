@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -127,12 +128,7 @@ func Export(c Context, w io.Writer) error {
 }
 
 func isCache(rel string) bool {
-	for _, dir := range cacheDirs {
-		if rel == dir {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(cacheDirs, rel)
 }
 
 // Import replaces the lake's data with a snapshot written by Export. The context must not

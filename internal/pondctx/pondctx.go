@@ -419,7 +419,7 @@ func Stop(c Context) {
 	_, _ = docker(bg, false, "stop", "-t", strconv.Itoa(stopTimeout), c.Container())
 	attached, _ := docker(bg, false, "network", "inspect", "-f", "{{range .Containers}}{{.Name}} {{end}}", c.Network())
 	rm := []string{"rm", "-f", c.Container()}
-	for _, name := range strings.Fields(attached) {
+	for name := range strings.FieldsSeq(attached) {
 		if name != c.Container() {
 			rm = append(rm, name)
 		}
@@ -458,7 +458,7 @@ func List() ([]Running, error) {
 		return nil, err
 	}
 	var found []Running
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
