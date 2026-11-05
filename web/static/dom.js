@@ -202,7 +202,27 @@ function openDialog(build) {
   });
 }
 
-// fields: [{ name, label, type: text|textarea|select|file|checkbox|password, value, placeholder, required, options, hint }]
+/**
+ * @typedef {object} Field
+ * @property {string} name
+ * @property {string} label
+ * @property {"text" | "textarea" | "select" | "file" | "checkbox" | "password" | string} [type]
+ * @property {any} [value]
+ * @property {string} [placeholder]
+ * @property {boolean} [required]
+ * @property {any[]} [options] strings, or { value, label } objects, for a select
+ * @property {string} [hint]
+ * @property {string} [pattern] checked by the browser, compiled with the v flag
+ * @property {string} [accept] file types, for a file field
+ * @property {number} [rows] for a textarea
+ */
+
+/**
+ * A modal form. Resolves to the field values, or null when cancelled.
+ * @param {{ title: string, intro?: any, fields: Field[], submit?: string, danger?: boolean,
+ *   validate?: (values: Record<string, any>) => string | null | undefined | false }} opts
+ * @returns {Promise<Record<string, any> | null>}
+ */
 export function formDialog({ title, intro, fields, submit = "Save", danger = false, validate }) {
   return openDialog((close) => {
     const err = h("div", { class: "form-error", hidden: true });
@@ -245,7 +265,11 @@ function field(f) {
   return h("label", { class: "field", for: common.id }, h("span", {}, f.label), input, f.hint && h("small", {}, f.hint));
 }
 
-// Destructive actions confirm by typing the name, so a stray click cannot drop data.
+/**
+ * Destructive actions confirm by typing the name, so a stray click cannot drop data.
+ * @param {{ title: string, body?: any, confirm?: string, typeToConfirm?: string }} opts
+ * @returns {Promise<boolean>}
+ */
 export function confirmDialog({ title, body, confirm = "Delete", typeToConfirm }) {
   return formDialog({
     title,

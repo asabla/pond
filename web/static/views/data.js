@@ -1,3 +1,4 @@
+// @ts-check
 // Data: catalogs → schemas → tables and volumes. Create, drop, preview, and import files.
 import { h, grid, table, action, button, snippet, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtBytes, guard } from "../dom.js";
 
@@ -29,6 +30,9 @@ export function createDataView(ui) {
 
   const page = (...children) => el.replaceChildren(h("div", { class: "page" }, ...children));
 
+  /**
+   * @param {{ crumbs?: any[], title: any, badges?: any[], actions?: any[], sub?: any }} props
+   */
   function header({ crumbs = [], title, badges = [], actions = [], sub }) {
     return [
       crumbs.length > 0 && h("div", { class: "crumbs" },
@@ -369,7 +373,9 @@ export function createDataView(ui) {
       if (t.status === "rejected") throw t.reason;
       ++token;
       renderTable(t.value, preview, true);
-      return { table: t.value, preview: preview.value, previewError: preview.reason?.message };
+      return preview.status === "fulfilled"
+        ? { table: t.value, preview: preview.value, previewError: undefined }
+        : { table: t.value, preview: undefined, previewError: preview.reason?.message };
     },
     snapshot: () => ({ selected: current.name ?? null, kind: current.kind }),
   };

@@ -1,3 +1,4 @@
+// @ts-check
 // Files: the lake's file system (DBFS root, including /Volumes) and the workspace.
 import { h, grid, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, download, fmtTime, fmtBytes } from "../dom.js";
 
@@ -221,7 +222,7 @@ export function createFilesView(ui) {
       objects = await lake.listWorkspace(current.path);
     }
     if (!live()) return;
-    objects.sort((a, b) => ((b.object_type === "DIRECTORY") - (a.object_type === "DIRECTORY")) || a.path.localeCompare(b.path));
+    objects.sort((a, b) => (Number(b.object_type === "DIRECTORY") - Number(a.object_type === "DIRECTORY")) || a.path.localeCompare(b.path));
     page(
       rootTabs(),
       h("div", { class: "title-row" }, crumbs(), h("div", { class: "actions" }, button("New script", newScript, "primary"))),

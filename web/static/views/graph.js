@@ -1,3 +1,4 @@
+// @ts-check
 // Graph: network analytics over lake tables. Draws a graph defined by SQL with sigma.js,
 // computes metrics with graphology, and finds paths. Graphs too big to load open on their
 // best-connected nodes and grow by expanding nodes; paths then come from SQL.
@@ -47,7 +48,8 @@ function loadLibs() {
     await loadScript("/vendor/graphology.umd.min.js");
     await loadScript("/vendor/graphology-library.min.js");
     await loadScript("/vendor/sigma.min.js");
-    return { Graph: window.graphology.Graph ?? window.graphology, lib: window.graphologyLibrary, Sigma: window.Sigma };
+    const w = /** @type {any} */ (window); // the vendor scripts set these globals
+    return { Graph: w.graphology.Graph ?? w.graphology, lib: w.graphologyLibrary, Sigma: w.Sigma };
   })().catch((err) => {
     libsPromise = undefined;
     throw err;
@@ -511,6 +513,7 @@ export function createGraphView(ui) {
     g.forEachNode((n) => g.setNodeAttribute(n, "size", base + (sizes ? sizes[n] * base * 3 : base)));
 
     s.legend = null;
+    /** @type {(node: string) => string} */
     let colorOf = () => t.node;
     if (s.color !== "none") {
       try {
@@ -976,7 +979,7 @@ export function createGraphView(ui) {
       submit: "Open graph",
     });
     if (!second) return;
-    const def = G.definitionFromTables({ ...first, ...second, name: null });
+    const def = G.definitionFromTables(/** @type {any} */ ({ ...first, ...second, name: null }));
     await openAdhoc(def);
   }
 

@@ -240,7 +240,7 @@ go test ./...                # Go tests use a fake docker CLI and fake MiniLake;
 node --test web/test/        # UI tests only (go test runs these too when node is installed)
 golangci-lint run            # Go linters, configured in .golangci.yml
 deno lint                    # UI linter, configured in deno.json
-deno check web/static/graph.js web/static/lake.js web/static/dom.js   # type-checks the shared UI modules
+deno check web/static/*.js web/static/views/*.js   # type-checks the UI modules
 go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 ```
 

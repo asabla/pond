@@ -1,3 +1,4 @@
+// @ts-check
 // App shell: routing, status, the catalog tree and agent activity. Views live in views/.
 import * as lake from "./lake.js";
 import { $, h, toast } from "./dom.js";
@@ -44,7 +45,7 @@ export function navigate(view, ...parts) {
 function render() {
   state.route = parseRoute();
   const { view, parts } = state.route;
-  for (const a of document.querySelectorAll(".tabs a")) a.setAttribute("aria-current", String(a.dataset.view === view));
+  for (const a of document.querySelectorAll(".tabs a")) a.setAttribute("aria-current", String(/** @type {HTMLElement} */ (a).dataset.view === view));
   $("#layout").classList.toggle("no-tree", !WITH_TREE.has(view));
   const main = $("#main");
   for (const [name, v] of Object.entries(views)) {
@@ -193,6 +194,10 @@ function highlight(text) {
   return [text.slice(0, i), h("mark", {}, text.slice(i, i + q.length)), text.slice(i + q.length)];
 }
 
+/**
+ * @param {{ label: any, glyph: string, meta?: string, open?: boolean, current?: boolean, onclick: () => void,
+ *   ontoggle?: () => void, title?: string }} props
+ */
 function node({ label, glyph, meta, open, current, onclick, ontoggle, title }) {
   return h("div", { class: "node", "aria-current": String(Boolean(current)), title },
     ontoggle

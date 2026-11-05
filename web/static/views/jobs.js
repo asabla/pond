@@ -1,3 +1,4 @@
+// @ts-check
 // Jobs: Python/PySpark scripts run in Spark containers on this context's network.
 import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtDuration } from "../dom.js";
 

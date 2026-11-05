@@ -1,3 +1,4 @@
+// @ts-check
 // Admin: this context, warehouses, secrets, MiniLake services, and resetting the lake.
 import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, snippet, fmtTime } from "../dom.js";
 

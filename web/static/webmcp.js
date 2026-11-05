@@ -1,3 +1,4 @@
+// @ts-check
 // WebMCP: exposes Pond's actions as tools on navigator.modelContext, so a browser agent can
 // drive the page. Tools act through the UI, so the human sees what the agent does, and
 // destructive tools ask the human first.
@@ -564,9 +565,9 @@ function wrap(tool, ui) {
 export function registerWebMcp(ui) {
   const tools = buildTools(ui).map((t) => wrap(t, ui));
   // Handy for debugging, and for agents that script the page directly.
-  window.pond = { tools: Object.fromEntries(tools.map((t) => [t.name, t])) };
+  /** @type {any} */ (window).pond = { tools: Object.fromEntries(tools.map((t) => [t.name, t])) };
 
-  const mc = navigator.modelContext;
+  const mc = /** @type {any} */ (navigator).modelContext;
   if (!mc) {
     return { ok: false, message: "This browser does not expose navigator.modelContext. Tools are still available on window.pond.tools." };
   }

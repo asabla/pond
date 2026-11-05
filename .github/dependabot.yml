@@ -1,0 +1,10 @@
+# Keeps the pinned GitHub Actions current. pond's Go code has no dependencies.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

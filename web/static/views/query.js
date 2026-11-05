@@ -1,3 +1,4 @@
+// @ts-check
 // Query: SQL editor, results, saved queries and the lake's query history.
 import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, fmtTime, fmtDuration, guard, syncTabs } from "../dom.js";
 import { changesCatalog } from "../sql.js";
@@ -90,6 +91,7 @@ export function createQueryView(ui) {
     );
   }
 
+  /** @param {{ name?: string, sql?: string, byAgent?: boolean }} [opts] */
   async function save({ name, sql = editor.value.trim(), byAgent = false } = {}) {
     if (!sql) return toast("Nothing to save yet.", "err");
     if (!name) {

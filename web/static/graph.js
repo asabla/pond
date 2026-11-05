@@ -47,7 +47,11 @@ export const normalize = (def) => ({
 
 const stripSemicolons = (sql) => sql.trim().replace(/;+\s*$/, "");
 
-// SQL for a graph over an existing table.
+/**
+ * SQL for a graph over an existing table.
+ * @param {{ name?: string | null, edgeTable: string, source: string, target: string, weight?: string, directed?: boolean,
+ *   nodeTable?: string, nodeId?: string, label?: string }} opts
+ */
 export function definitionFromTables({ name, edgeTable, source, target, weight, directed = true, nodeTable, nodeId, label }) {
   const cols = [`${quoteIdent(source)} AS source`, `${quoteIdent(target)} AS target`];
   if (weight) cols.push(`${quoteIdent(weight)} AS weight`);
