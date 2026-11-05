@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	defaultImage = "ghcr.io/dmux/minilake:1.9.0"
+	defaultImage = "ghcr.io/dmux/minilake:1.9.1"
 	// Label marks pond's containers and networks; its value is the context ID.
 	Label = "pond.context"
 	// LabelDir records the context's directory on its containers.

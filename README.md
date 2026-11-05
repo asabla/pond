@@ -79,7 +79,7 @@ Flags for `up` (each flag can also be set with an environment variable):
 | --- | --- | --- | --- |
 | `--port N` | `POND_PORT` | the context's last port, else 8700, else the next free one | UI port. With an explicit port, pond fails instead of picking another one. |
 | `--host HOST` | `POND_HOST` | `127.0.0.1` | Address the UI binds to. See [Sharing a context](#sharing-a-context). |
-| `--image IMAGE` | `POND_MINILAKE_IMAGE` | `ghcr.io/dmux/minilake:1.9.0` | MiniLake container image. |
+| `--image IMAGE` | `POND_MINILAKE_IMAGE` | `ghcr.io/dmux/minilake:1.9.1` | MiniLake container image. |
 | `--minilake URL` | `MINILAKE_URL` | none | Use a MiniLake you run yourself instead of starting a container. |
 | `--open` | none | off | Open the UI in a browser. |
 
@@ -187,7 +187,7 @@ Destructive actions (dropping, deleting folders, resetting) ask for confirmation
 
 ### Known limitations
 
-These come from MiniLake 1.9.0:
+These come from MiniLake 1.9.1:
 
 - Cancelling a run doesn't stop the script.
 - Run output appears only when the run finishes.

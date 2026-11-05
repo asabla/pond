@@ -52,7 +52,7 @@ Usage:
 Flags for up:
   --port N       UI port (default: 8700, or the next free one)
   --host HOST    UI bind host (default: 127.0.0.1, env POND_HOST)
-  --image IMAGE  MiniLake image (default: ghcr.io/dmux/minilake:1.9.0, env POND_MINILAKE_IMAGE)
+  --image IMAGE  MiniLake image (default: ghcr.io/dmux/minilake:1.9.1, env POND_MINILAKE_IMAGE)
   --minilake URL use an already running MiniLake at this URL instead of starting a container
                  (env MINILAKE_URL)
   --open         open the UI in a browser
