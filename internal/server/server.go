@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -101,6 +102,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	for _, prefix := range proxyPrefixes {
 		if strings.HasPrefix(p, prefix) {
+			if reason := crossSite(r); reason != "" {
+				sendJSON(w, http.StatusForbidden, map[string]string{"error_code": "FORBIDDEN", "message": reason})
+				return
+			}
 			h.proxy.ServeHTTP(w, r)
 			return
 		}
@@ -113,6 +118,25 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		sendJSON(w, http.StatusMethodNotAllowed, map[string]string{"error_code": "METHOD_NOT_ALLOWED", "message": r.Method})
 	}
+}
+
+// crossSite says why r came from another web page, or "" when it didn't. Browsers send
+// Origin and Sec-Fetch-Site and pages can't forge them, so this stops any site you visit
+// from driving the lake through localhost. Clients outside a browser (MCP, curl) send
+// neither and are let through.
+func crossSite(r *http.Request) string {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(u.Host, r.Host) {
+			return fmt.Sprintf("requests from %q are not allowed", origin)
+		}
+	}
+	// Covers the requests that carry no Origin, such as no-cors GETs. Same-site still
+	// means another origin, such as another port on localhost.
+	if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" || site == "same-site" {
+		return "requests from other sites are not allowed"
+	}
+	return ""
 }
 
 func hostname(hostport string) string {

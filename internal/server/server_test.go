@@ -299,7 +299,7 @@ func TestProxiesMCPStreamAndHeaders(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, e.pond.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Origin", "http://localhost:1")
+	req.Header.Set("Origin", e.pond.URL) // the UI itself
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -347,5 +347,27 @@ func TestUnreachableMiniLakeIs502(t *testing.T) {
 func TestRejectsNonGETOutsideProxy(t *testing.T) {
 	if resp, _ := setup(t, nil, "").request("POST", "/", nil, nil); resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status %d", resp.StatusCode)
+	}
+}
+
+func TestRefusesRequestsFromOtherSites(t *testing.T) {
+	e := setup(t, nil, "")
+	same := strings.TrimPrefix(e.pond.URL, "http://")
+	for name, tc := range map[string]struct {
+		path    string
+		headers map[string]string
+		want    int
+	}{
+		"other site":             {"/_minilake/reset", map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
+		"other localhost port":   {"/api/2.0/sql/statements", map[string]string{"Origin": "http://localhost:3000"}, http.StatusForbidden},
+		"opaque origin":          {"/mcp", map[string]string{"Origin": "null"}, http.StatusForbidden},
+		"no-cors without Origin": {"/_minilake/health", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+		"the UI itself":          {"/_minilake/health", map[string]string{"Origin": "http://" + same, "Sec-Fetch-Site": "same-origin"}, http.StatusOK},
+		"no browser headers":     {"/_minilake/health", nil, http.StatusOK},
+		"link to the UI":         {"/", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusOK},
+	} {
+		if resp, body := e.request("GET", tc.path, nil, tc.headers); resp.StatusCode != tc.want {
+			t.Errorf("%s: got %d %s, want %d", name, resp.StatusCode, body, tc.want)
+		}
 	}
 }
