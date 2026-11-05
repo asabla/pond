@@ -231,10 +231,13 @@ In browsers without native WebMCP, load a WebMCP polyfill (for example MCP-B's `
 go run . ~/some/dir          # run from a checkout
 go test ./...                # Go tests use a fake docker CLI and fake MiniLake; no daemon needed
 node --test web/test/        # UI tests only (go test runs these too when node is installed)
+golangci-lint run            # Go linters, configured in .golangci.yml
+deno lint                    # UI linter, configured in deno.json
+deno check web/static/graph.js web/static/lake.js web/static/dom.js   # type-checks the shared UI modules
 go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 ```
 
-Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases and updates the Homebrew cask in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap). CI runs the same tests on every push and pull request.
+Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases and updates the Homebrew cask in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap). CI runs the same tests, plus the linters and `govulncheck`, on every push and pull request.
 
 The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`.
 

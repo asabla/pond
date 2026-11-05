@@ -758,7 +758,7 @@ export function createGraphView(ui) {
         st.average_clustering != null && ["Average clustering", st.average_clustering],
         st.diameter != null && ["Diameter", st.diameter],
       ].filter(Boolean);
-      put(panelBody, 
+      put(panelBody,
         h("dl", { class: "kv graph-kv" }, rows.map(([k, v]) => [h("dt", {}, k), h("dd", {}, fmt(v))])),
         h("div", { class: "graph-actions" },
           !s.groups.community && h("button", { class: "btn", onclick: async () => (await busy(() => grouping("community")), renderPanel()) }, "Find communities"),
@@ -791,7 +791,7 @@ export function createGraphView(ui) {
       h("h3", {}, `${title} (${nodes.length.toLocaleString()})`),
       h("ul", {}, nodes.slice(0, 50).map((n) => h("li", {}, h("button", { class: "linkish", onclick: () => select(n, { center: true }) }, g.getNodeAttribute(n, "label")))),
         nodes.length > 50 && h("li", { class: "muted" }, `and ${(nodes.length - 50).toLocaleString()} more`)));
-    put(panelBody, 
+    put(panelBody,
       h("h2", { class: "graph-node-title" }, a.label),
       h("dl", { class: "kv graph-kv" },
         h("dt", {}, "Id"), h("dd", {}, key),
@@ -832,7 +832,7 @@ export function createGraphView(ui) {
       }
     };
     const p = s.path;
-    put(panelBody, 
+    put(panelBody,
       h("form", { class: "graph-path-form", onsubmit: (e) => (e.preventDefault(), go()) },
         from, to,
         weighted() && h("label", { class: "check" }, useWeights, " Use edge weights"),
@@ -872,7 +872,7 @@ export function createGraphView(ui) {
 
   function renderTable() {
     const data = tableData({ display: true });
-    put(tableWrap, 
+    put(tableWrap,
       h("div", { class: "results-bar" },
         h("b", {}, `${data.rows.length.toLocaleString()} nodes`),
         data.rows.length > TABLE_ROWS && h("span", { class: "muted" }, `showing the top ${TABLE_ROWS.toLocaleString()}`),

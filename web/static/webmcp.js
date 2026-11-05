@@ -49,7 +49,7 @@ function summarizeRun(run, output, lake) {
 }
 
 async function runResult(lake, runId, wait) {
-  let run = wait ? await lake.waitForRun(runId) : await lake.getRun(runId);
+  const run = wait ? await lake.waitForRun(runId) : await lake.getRun(runId);
   const output = lake.isRunDone(run) ? await lake.getRunOutput(run.tasks?.[0]?.run_id ?? runId).catch(() => null) : null;
   return summarizeRun(run, output, lake);
 }

@@ -1,3 +1,4 @@
+// @ts-check
 // MiniLake client. Pond's server proxies /api and /_minilake to MiniLake, so every call is
 // same-origin. Shared by the UI and the WebMCP tools so both see the lake the same way.
 
@@ -268,6 +269,7 @@ export const listJobs = async () => (await call("GET", `${JOBS}/list?${q({ limit
 export const getJob = (id) => call("GET", `${JOBS}/get?${q({ job_id: id })}`);
 export const deleteJob = (id) => call("POST", `${JOBS}/delete`, { job_id: Number(id) });
 export const runNow = (id) => call("POST", `${JOBS}/run-now`, { job_id: Number(id) });
+/** @param {{ jobId?: number, limit?: number }} [opts] */
 export const listRuns = async ({ jobId, limit = 50 } = {}) =>
   (await call("GET", `${JOBS}/runs/list?${q({ job_id: jobId, limit })}`)).runs ?? [];
 export const getRun = (id) => call("GET", `${JOBS}/runs/get?${q({ run_id: id })}`);
@@ -310,6 +312,10 @@ export async function runScript(name, source, parameters) {
 
 export const isRunDone = (run) => ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"].includes(run?.state?.life_cycle_state);
 
+/**
+ * @param {number} id
+ * @param {{ timeoutMs?: number, onUpdate?: (run: any) => void }} [opts]
+ */
 export async function waitForRun(id, { timeoutMs = 300000, onUpdate } = {}) {
   const deadline = Date.now() + timeoutMs;
   let run = await getRun(id);

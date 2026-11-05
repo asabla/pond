@@ -1,3 +1,4 @@
+// @ts-check
 // Graph analytics helpers shared by the Graph view and WebMCP. Plain functions over rows and
 // maps, so they are testable without a browser; graphology and sigma are used by the view.
 //
@@ -219,6 +220,7 @@ export function scale(values) {
 export const PATH_MAX_HOPS = 20;
 export async function sqlShortestPath({ runSql, def, columns, from, to, directed, maxDepth = PATH_MAX_HOPS, maxFrontier = 20000 }) {
   if (keyOf(from) === keyOf(to)) return [from];
+  /** @type {[Side, Side]} */
   const sides = [
     { parent: new Map([[keyOf(from), null]]), raw: new Map([[keyOf(from), from]]), frontier: [from], backward: false },
     { parent: new Map([[keyOf(to), null]]), raw: new Map([[keyOf(to), to]]), frontier: [to], backward: true },
@@ -247,6 +249,11 @@ export async function sqlShortestPath({ runSql, def, columns, from, to, directed
   throw new Error(`No path within ${maxDepth} hops.`);
 }
 
+/**
+ * @typedef {{ parent: Map<string, any>, raw: Map<string, any>, frontier: any[], backward: boolean }} Side
+ * @param {[Side, Side]} sides
+ * @param {string} meet
+ */
 function join([fwd, bwd], meet) {
   const path = [];
   for (let k = meet; k != null; k = fwd.parent.get(k)) path.unshift(fwd.raw.get(k));

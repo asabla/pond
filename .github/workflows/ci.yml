@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -24,4 +24,28 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -race -shuffle=on ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      # Deno only lints and type-checks the plain JS; the UI has no build step.
+      - run: deno lint
+      - run: deno check web/static/graph.js web/static/lake.js web/static/dom.js

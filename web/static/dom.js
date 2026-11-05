@@ -1,3 +1,4 @@
+// @ts-check
 // Shared DOM helpers. No framework: views rebuild their part of the page from state.
 
 export const $ = (sel, root = document) => root.querySelector(sel);
@@ -68,6 +69,11 @@ export function grid({ columns, rows }, { max = 1000 } = {}) {
 }
 
 // Simple key/value table for lists of objects: cols = [[label, row => node|string], ...].
+/**
+ * @param {any[]} rows
+ * @param {any[]} cols [header, cell(row)] pairs
+ * @param {{ onRow?: (row: any) => void, empty?: string }} [opts]
+ */
 export function table(rows, cols, { onRow, empty: emptyText = "Nothing here yet." } = {}) {
   if (!rows.length) return empty(emptyText);
   return h("div", { class: "grid-wrap" }, h("table", { class: "grid list" },

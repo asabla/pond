@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "strict": false,
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ]
+  },
+  "lint": {
+    "include": [
+      "web/static/",
+      "web/test/"
+    ],
+    "exclude": [
+      "web/static/vendor/"
+    ],
+    "rules": {
+      "tags": [
+        "recommended"
+      ],
+      "include": [
+        "no-eval",
+        "no-throw-literal",
+        "prefer-const",
+        "no-non-null-assertion"
+      ],
+      "exclude": [
+        "no-window",
+        "no-window-prefix",
+        "require-await"
+      ]
+    }
+  }
+}

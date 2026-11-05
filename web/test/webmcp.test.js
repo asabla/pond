@@ -16,7 +16,7 @@ function fakeUi({ confirm = true } = {}) {
     navigate: (view) => nav.push(view),
     refreshTree: async () => {},
     snapshot: () => ({ view: "data" }),
-    logAgent: (name, input, error) => log.push({ name, error }),
+    logAgent: (name, _input, error) => log.push({ name, error }),
     views: {
       data: { dropObject: async () => confirm, open: async () => {} },
       query: {},
