@@ -1,12 +1,12 @@
 # pond
 
-A local data lake per directory. Run `pond` in a folder and you get a [MiniLake](https://dmux.github.io/minilake) (a local Databricks emulator) for that folder, a web UI to work with it, and **MCP** and **WebMCP** endpoints so agents can work with it too.
+A local data lake per directory. Run `pond` in a folder and you get a [MiniLake](https://dmux.github.io/minilake) (a local Databricks emulator) for that folder, a web UI to work with it, and **MCP** and **WebMCP** endpoints so agents can work with it too. Run it in several folders and one page shows all of their lakes side by side.
 
 Use it to try out Databricks-style catalogs, Delta tables, SQL and PySpark jobs on your own machine, with each project's data kept separate and next to the project.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/graph-dark.png">
-  <img alt="The Graph tab showing the example messaging network: 300 people coloured by team in six clusters, sized by betweenness, with graph statistics in the side panel" src="docs/images/graph-light.png">
+  <img alt="The pond workbench with two contexts, social and shop, in the navigator, and the example messaging network open in a graph tab: 300 people coloured by community in six clusters" src="docs/images/graph-light.png">
 </picture>
 
 ## Requirements
@@ -97,7 +97,9 @@ Each directory is its own **context**, so data from different projects never mix
 - **One MiniLake container** runs per context, named `pond-<name>-<hash>-minilake`, on its own Docker network, `pond-<name>-<hash>`. MiniLake's Spark job containers join that network, so they are scoped to the context and can call back into its MiniLake.
 - **The URL is stable.** The context remembers its UI port, so an MCP registration keeps pointing at the same context. If another program holds that port, pond uses a free one for that run and tells you which MCP registrations won't reach it.
 - **One pond per context.** The running pond holds a lock on `.pond/lock`, so a second `pond` in the same directory points you at the first one instead of starting another lake.
-- **The context name is visible everywhere:** in the terminal banner, the UI header, the browser tab title, the suggested MCP server name and WebMCP's `get_view` tool.
+- **The context name is visible everywhere:** in the terminal banner, the UI's navigator and tabs (each context has its own colour), the browser tab title, the suggested MCP server name and WebMCP's `get_view` tool.
+- **Every pond's UI shows every context.** Open any of them and the navigator lists all running contexts, plus recently used ones that are stopped, with the command to start them. Tables, queries and graphs from different directories open as tabs side by side. Requests for another context go through the pond you have open, so the page stays on one origin. MCP stays per context, so an agent works in one lake at a time.
+- **Copy a table between contexts** with **Copy to…** on its page. It is copied as it is then, through a Parquet file, so the copy doesn't change when the original does.
 
 Ctrl-C stops the context gracefully (MiniLake snapshots its state), then removes every container on the context's network and the network itself. If pond was killed, the next `pond` in that directory cleans up the leftovers first.
 
@@ -135,7 +137,9 @@ pond examples/social
 
 ![Terminal output of pond up seeding the example, and pond ls listing the running context](docs/images/cli.png)
 
-In the **Data** tab, open `demo.social.messages`, choose **Open as graph**, and pick `demo.social.people` as the node table with `name` as the label.
+In the navigator, open **Tables** → `demo` → `social` → `messages`, choose **Open as graph**, and pick `demo.social.people` as the node table with `name` as the label.
+
+[`examples/shop`](examples/shop/pond-seed) is a second context: a web shop with products and 1,200 orders whose customer ids are the people of `examples/social`. Run both (`pond examples/social` and `pond examples/shop` in two terminals) to try working across contexts: copy `shop.sales.orders` into `social` with **Copy to…**, then join it with `demo.social.people` there.
 
 ## Snapshots
 
@@ -155,14 +159,24 @@ Whether shared or not, pond refuses requests to the lake that another web page s
 
 ## UI
 
-| Section | What you can do |
+The UI is a workbench:
+
+- **The navigator** on the left lists each context with its tables (catalog → schema → table), saved queries, graphs and jobs, plus its files, workspace and settings. Filter it from the box at the top.
+- **Tabs** hold what you open: a table, a query, a graph, a job run. Following a link inside a tab replaces what it shows, and ⌘-click (Ctrl-click) opens a new tab instead. Tabs, and what is expanded in the navigator, survive a reload.
+- **⌘K** (Ctrl-K) searches tables, saved queries, graphs and jobs across every context, and runs commands such as **New query**, **Import a file** or switching the theme.
+- **Activity**, on the right, lists what you and agents did in this page. It also holds the setting that lets agents delete or replace data without asking.
+
+| Tab | What you can do |
 | --- | --- |
-| **Data** | Browse catalogs → schemas → tables and volumes. Create and drop catalogs, schemas and volumes; drop tables. Import CSV, TSV, JSON, JSON Lines or Parquet into a table by dropping a file anywhere (create, replace or append). Table pages show columns, a preview and storage details. |
-| **Query** | SQL editor (⌘↵ runs, ⌘S saves, ⌘K jumps here), result grid, CSV export, saved queries and the lake's query history. MiniLake runs the DuckDB dialect, not Spark SQL. |
+| **Overview** | A context at a glance: its tables with row counts, recent queries, saved queries and graphs, recent runs, and how to connect an agent. Drop a file on it to import it. |
+| **Tables** | Browse catalogs → schemas → tables and volumes. Create and drop catalogs, schemas and volumes; drop tables. Import CSV, TSV, JSON, JSON Lines or Parquet into a table by dropping a file (create, replace or append). Table pages show a preview, the columns and storage details, and can copy the table to another context. |
+| **Query** | A SQL editor with highlighting (⌘↵ runs, ⌘S saves), result grid, CSV export and the lake's query history. Each query tab keeps its own draft. MiniLake runs the DuckDB dialect, not Spark SQL. |
 | **Graph** | Explore relationships in your tables as an interactive network. See [Graphs](#graphs). |
 | **Jobs** | Write and run Python/PySpark scripts once, or save them as jobs and run them again. Runs show status, duration and output. |
 | **Files** | Browse the lake's files (DBFS and `/Volumes`): upload by drag and drop, create folders, download, delete, preview data files as tables, query a file in place or turn it into a table. Browse and edit workspace scripts, and run them. |
-| **Admin** | Context details, SQL warehouses, secret scopes and keys, MiniLake's services, and resetting this context's lake. |
+| **Settings** | Context details, connecting an agent, SQL warehouses, secret scopes and keys, and resetting this context's lake. |
+
+The theme follows your system; the button next to **Activity** switches between system, light and dark.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/query-dark.png">
@@ -221,7 +235,7 @@ The page registers its actions as tools on `navigator.modelContext` ([spec](http
 | Jobs | `list_jobs`, `list_runs`, `get_run`, `run_script`, `create_job`, `run_job` |
 | Graph | `list_graphs`, `open_graph`, `save_graph`, `graph_metrics`, `graph_stats`, `shortest_path`, `graph_neighbors` |
 | Files | `list_files`, `read_file`, `write_file`, `delete_path`, `list_workspace`, `read_workspace_file`, `write_workspace_file` |
-| Admin | `list_warehouses`, `list_secrets`, `put_secret`, `reset_lake` |
+| Settings | `list_warehouses`, `list_secrets`, `put_secret`, `reset_lake` |
 
 `drop_object`, `delete_path` and `reset_lake` open the same confirmation dialog a person gets, through `requestUserInteraction` when the browser provides it. Tools also ask before they delete or replace data in other ways:
 - `run_sql` with a statement that drops, deletes, truncates or replaces data, anywhere in the SQL;
@@ -246,23 +260,27 @@ go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 
 Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases, with the Homebrew cask `pond.rb` attached. Copy it into `Casks/` in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap) to update `brew install`. CI runs the same tests, plus the linters and `govulncheck`, on every push and pull request.
 
-The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`.
+The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`. While working on it, set `POND_UI_DIR=web/static` and pond serves the UI from disk instead, so a reload shows your changes.
 
 ```
 main.go                      CLI: up, ls, down, open, logs, seed, reset, export, import, version
 internal/pondctx/            per-directory contexts: containers, network, lock, .pond/ data and snapshots
-internal/server/             embedded UI, MiniLake proxy (/api, /_minilake, /mcp), /pond/config
+internal/server/             embedded UI, MiniLake proxy (/api, /_minilake, /mcp), /pond/config, other contexts (/pond/contexts, /ctx/<id>/)
 internal/lake/               MiniLake calls pond makes itself: warehouse, SQL, catalogs, runs, reset
 internal/seed/               runs pond-seed/ scripts
 web/static/                  UI: plain HTML/CSS/JS modules, no build step
   lake.js                    MiniLake API client, shared by UI and WebMCP
   graph.js                   graph definitions, SQL builders and metrics, shared by UI and WebMCP
-  app.js                     shell: routing, catalog tree, status, agent activity
-  views/                     data, query, graph, jobs, files, admin
+  workbench.js               shell: contexts, navigator, tabs, ⌘K palette, activity, routing
+  editor.js                  code editor with SQL and Python highlighting
+  sql.js                     quote-aware SQL scanner: statements, destructive SQL
+  views/                     home, data, query, graph, jobs, files, admin; one instance per tab
+  fonts/                     Schibsted Grotesk and Fragment Mono, with their licences (OFL)
   vendor/                    sigma.js and graphology browser builds, with their licences
   webmcp.js                  WebMCP tool definitions
 web/test/                    UI unit tests (node --test, no dependencies)
 examples/social/             seed scripts for a generated example network
+examples/shop/               a second example context: a shop whose customers are social's people
 docs/images/                 README screenshots, taken from the example
 ```
 
