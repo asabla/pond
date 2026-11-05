@@ -329,6 +329,10 @@ func Start(ctx context.Context, c Context, image string, onStatus func(string)) 
 		image,
 	)
 	if _, err := docker(ctx, true, run...); err != nil {
+		// Docker Desktop refuses outright to mount a path it doesn't share.
+		if msg := err.Error(); strings.Contains(msg, "bind source path does not exist") || strings.Contains(msg, "mounts denied") {
+			return "", mountError(c)
+		}
 		return "", err
 	}
 	if err := checkMount(ctx, c); err != nil {
@@ -368,11 +372,15 @@ func checkMount(ctx context.Context, c Context) error {
 		seen = "" // the marker isn't there: the container sees an empty folder
 	}
 	if seen != c.ID() {
-		return fmt.Errorf("Docker cannot see %s, so data would not land in %s.\n"+
-			"Share this path with your Docker VM (colima and Docker Desktop share your home "+
-			"directory by default), or run pond from a directory under it.", c.Dir, c.StateDir())
+		return mountError(c)
 	}
 	return nil
+}
+
+func mountError(c Context) error {
+	return fmt.Errorf("Docker cannot see %s, so data would not land in %s.\n"+
+		"Share this path with your Docker VM (colima and Docker Desktop share your home "+
+		"directory by default), or run pond from a directory under it.", c.Dir, c.StateDir())
 }
 
 // exitedError reports, with its last log lines, a MiniLake container that stopped.

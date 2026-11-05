@@ -265,7 +265,9 @@ func (h *handler) config(w http.ResponseWriter, r *http.Request) {
 		Error       *string `json:"error"`
 		Version     string  `json:"version"`
 		DataRoot    *string `json:"data_root"`
+		Home        string  `json:"home,omitempty"` // shortens paths to ~ in the UI
 	}{MinilakeURL: h.Lake.URL(), Context: h.Context, Version: h.Version}
+	out.Home, _ = os.UserHomeDir()
 	if h.DataRoot != "" {
 		out.DataRoot = &h.DataRoot
 	}

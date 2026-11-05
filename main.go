@@ -352,6 +352,10 @@ func up(a *args) error {
 	if err != nil {
 		return err
 	}
+	// For UI work: serve web/static from disk, so a reload shows changes without a rebuild.
+	if dir := os.Getenv("POND_UI_DIR"); dir != "" {
+		static = os.DirFS(dir)
+	}
 
 	port := a.port
 	if !a.portExplicit && c != nil {
@@ -464,8 +468,24 @@ func peers(self *pondctx.Context) func() []server.Peer {
 		}
 		// While starting, this context may not be listed yet; it always is to its own UI.
 		if self != nil && !slices.ContainsFunc(out, func(p server.Peer) bool { return p.Self }) {
-			out = append([]server.Peer{{ID: self.ID(), Name: self.Name(), Dir: self.Dir, Running: true, Self: true}}, out...)
+			out = append(out, server.Peer{ID: self.ID(), Name: self.Name(), Dir: self.Dir, Running: true, Self: true})
 		}
+		// This context first, then running ones, then stopped ones, each by name.
+		slices.SortStableFunc(out, func(a, b server.Peer) int {
+			rank := func(p server.Peer) int {
+				switch {
+				case p.Self:
+					return 0
+				case p.Running:
+					return 1
+				}
+				return 2
+			}
+			if d := rank(a) - rank(b); d != 0 {
+				return d
+			}
+			return strings.Compare(a.Name, b.Name)
+		})
 		return out
 	}
 }

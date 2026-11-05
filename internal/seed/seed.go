@@ -60,7 +60,11 @@ func Run(ctx context.Context, l Lake, dir string, logf func(string, ...any)) err
 	if err != nil || len(files) == 0 {
 		return err
 	}
-	logf("Seeding from %s/ (%d files)…", Dir, len(files))
+	noun := "files"
+	if len(files) == 1 {
+		noun = "file"
+	}
+	logf("Seeding from %s/ (%d %s)…", Dir, len(files), noun)
 	for _, path := range files {
 		name := filepath.Base(path)
 		logf("  %s", name)

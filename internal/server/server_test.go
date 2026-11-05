@@ -218,7 +218,7 @@ func TestHostFlagMatchesAnyCase(t *testing.T) {
 }
 
 func TestServesStaticFilesToHead(t *testing.T) {
-	if resp, body := setup(t, nil, "").request("HEAD", "/app.js", nil, nil); resp.StatusCode != http.StatusOK || len(body) != 0 {
+	if resp, body := setup(t, nil, "").request("HEAD", "/workbench.js", nil, nil); resp.StatusCode != http.StatusOK || len(body) != 0 {
 		t.Errorf("HEAD: status %d, %d body bytes", resp.StatusCode, len(body))
 	}
 }
