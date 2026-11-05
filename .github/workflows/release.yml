@@ -29,11 +29,12 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Copy this file into Casks/ in asabla/homebrew-tap to publish the release.
-      - name: Attach the Homebrew cask
+      # Keep the release draft until the cask is attached, then publish all assets together.
+      - name: Attach the Homebrew cask and publish the release
         run: |
           cask=$(find dist -name pond.rb | head -n 1)
           test -n "$cask" || { echo "GoReleaser wrote no pond.rb"; exit 1; }
           gh release upload "$GITHUB_REF_NAME" "$cask"
+          gh release edit "$GITHUB_REF_NAME" --draft=false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

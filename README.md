@@ -124,6 +124,7 @@ CREATE OR REPLACE TABLE shop.raw.customers AS
 
 - **SQL files** can hold several statements, separated by semicolons, in MiniLake's DuckDB dialect. Pond runs `CREATE CATALOG [IF NOT EXISTS] name` and `CREATE SCHEMA [IF NOT EXISTS] catalog.schema` through Unity Catalog itself: DuckDB has no `CREATE CATALOG`, and a schema made in SQL works but doesn't appear in the catalog tree. The Query tab does the same.
 - **Python files** run as one-off jobs, so they can use PySpark. They are saved in the workspace under `/Shared/pond/seed/`.
+- **`.pond.json` files** add saved queries and graph definitions to the workbench. A file contains `queries` (`name`, `sql`) and `graphs` (the graph definition fields described below). Existing definitions with the same name are kept, including user edits. Other `.json` files are ignored. Missing saved definitions are also added when an existing context starts; table and Python seeds do not run again.
 
 Seeding stops at the first failure and prints the error, including the end of a failed Python run's output. A Python script that runs for more than an hour is stopped. Fix the script, then run `pond reset` to start from an empty lake, or `pond seed` to run all the scripts again. Scripts that use `IF NOT EXISTS` or `CREATE OR REPLACE` can safely run more than once. If seeding didn't finish, the next `pond` start says so, because the lake may be half seeded.
 
@@ -139,7 +140,11 @@ pond examples/social
 
 In the navigator, open **Tables** → `demo` → `social` → `messages`, choose **Open as graph**, and pick `demo.social.people` as the node table with `name` as the label.
 
+The **Graphs** and **Queries** sections also contain **Messaging** and **Team traffic**, ready to open. The definitions are committed in `04_workbench.pond.json`, so they appear on a fresh start and are added to older example contexts on restart.
+
 [`examples/shop`](examples/shop/pond-seed) is a second context: a web shop with products and 1,200 orders whose customer ids are the people of `examples/social`. Run both (`pond examples/social` and `pond examples/shop` in two terminals) to try working across contexts: copy `shop.sales.orders` into `social` with **Copy to…**, then join it with `demo.social.people` there.
+
+Shop includes **Customer purchases** (a customer-to-product graph) and **Products bought together** (an undirected product graph), each with a saved SQL query. Existing tables and saved definitions are preserved when these examples are added. Restart an already running context with the new binary to load missing definitions, then refresh its navigator.
 
 ## Snapshots
 
@@ -297,6 +302,8 @@ go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 The graph tests compare every metric and grouping in the embedded runtime with the same fixtures in Node's JavaScript engine. For the optional live check, start an isolated context with the social seeds, save the graph as `Messaging` using the command above, and run `POND_GRAPH_ACCEPTANCE_URL=http://localhost:PORT go test ./internal/server -run TestLiveGraphAcceptance -v`. This check needs MiniLake 1.9.1 and includes large-graph scope and SQL path limits.
 
 Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases, with the Homebrew cask `pond.rb` attached. Copy it into `Casks/` in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap) to update `brew install`. CI runs the same tests, plus the linters and `govulncheck`, on every push and pull request.
+
+Release archives include both examples. The cask keeps them in its version folder under `$(brew --caskroom pond)` and prints a command to copy them into a writable location. See [release preparation and tap transfer](docs/releasing.md) for the first-release steps and checksum checks. A tap preview is not an installable release.
 
 The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`. While working on it, set `POND_UI_DIR=web/static` and pond serves the UI from disk instead, so a reload shows your changes.
 

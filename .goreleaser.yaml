@@ -20,9 +20,15 @@ archives:
     files:
       - README.md
       - LICENSE
+      - examples/*/pond-seed/*.sql
+      - examples/*/pond-seed/*.pond.json
 
 checksum:
   name_template: checksums.txt
+
+# The workflow attaches the generated cask before making the release public.
+release:
+  draft: true
 
 changelog:
   sort: asc
@@ -35,7 +41,7 @@ homebrew_casks:
     binaries: [pond]
     directory: Casks
     homepage: https://github.com/asabla/pond
-    description: A local data lake per directory, with a web UI and MCP endpoints
+    description: Local data lake per directory with a web UI and MCP endpoints
     repository:
       owner: asabla
       name: homebrew-tap
@@ -43,10 +49,17 @@ homebrew_casks:
     # Don't push to the tap: the workflow attaches pond.rb to the release, and
     # it goes into asabla/homebrew-tap by hand, like the other casks there.
     skip_upload: true
+    zap:
+      trash:
+        - "~/Library/Application Support/pond/recent.json"
+        - "~/.config/pond/recent.json"
     commit_msg_template: "chore: release pond {{ .Tag }}"
     caveats: |
       pond runs MiniLake in a container, so it needs a running Docker
       (Docker Desktop, OrbStack or colima).
+      Copy the examples into a writable directory before starting them:
+        cp -R "$(brew --caskroom pond)/{{ .Version }}/examples" ./pond-examples
+        pond ./pond-examples/social
     hooks:
       post:
         # The binary isn't signed or notarized; let macOS run it without the Gatekeeper prompt.
