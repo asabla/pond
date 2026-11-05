@@ -40,7 +40,9 @@ homebrew_casks:
       owner: asabla
       name: homebrew-tap
       branch: main
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    # Don't push to the tap: the workflow attaches pond.rb to the release, and
+    # it goes into asabla/homebrew-tap by hand, like the other casks there.
+    skip_upload: true
     commit_msg_template: "chore: release pond {{ .Tag }}"
     caveats: |
       pond runs MiniLake in a container, so it needs a running Docker

@@ -237,7 +237,7 @@ deno check web/static/graph.js web/static/lake.js web/static/dom.js   # type-che
 go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 ```
 
-Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases and updates the Homebrew cask in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap). CI runs the same tests, plus the linters and `govulncheck`, on every push and pull request.
+Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases, with the Homebrew cask `pond.rb` attached. Copy it into `Casks/` in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap) to update `brew install`. CI runs the same tests, plus the linters and `govulncheck`, on every push and pull request.
 
 The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`.
 
