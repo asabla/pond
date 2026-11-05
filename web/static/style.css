@@ -60,6 +60,10 @@
   --seq-1: #86b6ef; --seq-2: #5598e7; --seq-3: #2a78d6; --seq-4: #1c5cab; --seq-5: #104281;
   --graph-node: #17594f;
   --graph-edge: #cfd8d3;
+  /* Code: text colours of their own, each at least 4.5:1 on the editor's surface. The
+     chart palette above is tuned for marks, not for reading. */
+  --syn-keyword: #17594f; --syn-string: #9a3412; --syn-number: #1d4ed8;
+  --syn-function: #6d28d9; --syn-comment: #5b6d66; --syn-ident: #43554f;
   color-scheme: light;
 }
 
@@ -78,6 +82,8 @@
     --series-other: #4f5c58;
     --seq-1: #184f95; --seq-2: #256abf; --seq-3: #3987e5; --seq-4: #6da7ec; --seq-5: #9ec5f4;
     --graph-node: #5fc2ae; --graph-edge: #2b3d37;
+    --syn-keyword: #6fd3bf; --syn-string: #f2a37c; --syn-number: #93b7ff;
+    --syn-function: #c9adff; --syn-comment: #93a69f; --syn-ident: #b4c5bf;
     color-scheme: dark;
   }
 }
@@ -95,6 +101,8 @@
   --series-other: #4f5c58;
   --seq-1: #184f95; --seq-2: #256abf; --seq-3: #3987e5; --seq-4: #6da7ec; --seq-5: #9ec5f4;
   --graph-node: #5fc2ae; --graph-edge: #2b3d37;
+  --syn-keyword: #6fd3bf; --syn-string: #f2a37c; --syn-number: #93b7ff;
+  --syn-function: #c9adff; --syn-comment: #93a69f; --syn-ident: #b4c5bf;
   color-scheme: dark;
 }
 
@@ -729,7 +737,7 @@ table.grid { border-collapse: separate; border-spacing: 0; font: var(--t-sm)/1.4
   min-width: 42px;
   text-align: right;
   font: var(--code-font);
-  color: var(--ink-3);
+  color: var(--syn-comment);
   background: var(--surface-2);
   border-right: 1px solid var(--line);
   overflow: hidden;
@@ -762,13 +770,13 @@ table.grid { border-collapse: separate; border-spacing: 0; font: var(--t-sm)/1.4
 }
 .code-input::placeholder { color: var(--ink-3); }
 .code-input::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); color: transparent; }
-.tok-keyword { color: var(--accent); font-weight: 600; }
-.tok-string { color: color-mix(in srgb, var(--series-2) 85%, var(--ink)); }
-.tok-number { color: var(--series-1); }
-.tok-comment { color: var(--ink-3); font-style: italic; }
-.tok-function { color: var(--series-6); }
-.tok-ident { color: var(--ink-2); }
-.tok-decorator { color: var(--series-6); }
+.tok-keyword { color: var(--syn-keyword); font-weight: 600; }
+.tok-string { color: var(--syn-string); }
+.tok-number { color: var(--syn-number); }
+.tok-comment { color: var(--syn-comment); font-style: italic; }
+.tok-function { color: var(--syn-function); }
+.tok-ident { color: var(--syn-ident); }
+.tok-decorator { color: var(--syn-function); }
 .script-editor { height: 360px; resize: vertical; }
 
 /* ---------- Query ---------- */
