@@ -198,6 +198,9 @@ func parse(argv []string) (*args, error) {
 		envPort := os.Getenv("POND_PORT")
 		a.portExplicit = flagSet(fs, "port") || envPort != ""
 		a.port = *port
+		if flagSet(fs, "port") && (a.port < 1 || a.port > 65535) {
+			return nil, fmt.Errorf("--port takes a port from 1 to 65535, got %d", a.port)
+		}
 		if a.port == 0 {
 			a.port = defaultPort
 			if envPort != "" {
@@ -287,7 +290,6 @@ func up(a *args) error {
 			return fmt.Errorf("%s is not a directory", c.Dir)
 		}
 		lock, err := pondctx.Acquire(*c)
-		fresh = pondctx.Fresh(*c)
 		if errors.Is(err, pondctx.ErrRunning) {
 			if info := pondctx.Serving(*c); info != nil && info.UI != "" {
 				logf("pond · %s is already running: %s", c.Name(), info.UI)
@@ -300,6 +302,10 @@ func up(a *args) error {
 			return err
 		}
 		defer lock.Release()
+		// A container left by a killed pond writes its state back when stopped, so
+		// stop it before judging whether the lake is fresh.
+		stopLeftover(*c)
+		fresh = pondctx.Fresh(*c)
 		if err := pondctx.WriteRunFile(*c, pondctx.RunInfo{PID: os.Getpid()}); err != nil {
 			return err
 		}
@@ -607,6 +613,7 @@ func reset(a *args) error {
 			return err
 		}
 		defer lock.Release()
+		stopLeftover(c)
 		if err := pondctx.ClearData(c); err != nil {
 			return err
 		}
@@ -639,7 +646,19 @@ func lockStopped(c pondctx.Context, dir string) (*pondctx.Lock, error) {
 	if errors.Is(err, pondctx.ErrRunning) {
 		return nil, fmt.Errorf("%s is running. Stop it first with `pond down%s`", c.Name(), strings.TrimPrefix(startCommand(dir), "pond"))
 	}
+	if err == nil {
+		stopLeftover(c)
+	}
 	return lock, err
+}
+
+// stopLeftover stops a container left by a pond that was killed, so it can't write its
+// state over the data an offline command is about to change.
+func stopLeftover(c pondctx.Context) {
+	if pondctx.Exists(c) {
+		logf("Stopping a MiniLake container left behind by an earlier pond…")
+		pondctx.Stop(c)
+	}
 }
 
 func export(a *args) error {
@@ -728,8 +747,15 @@ func down(a *args) error {
 		logf("Stopped %s.", c.Name())
 		return nil
 	}
-	pondctx.Stop(c)
 	os.Remove(c.RunFile())
-	logf("Removed containers for %s. Data in %s is kept.", c.Name(), c.StateDir())
+	if !pondctx.Exists(c) {
+		logf("%s is not running.", c.Name())
+		return nil
+	}
+	pondctx.Stop(c)
+	if pondctx.Exists(c) {
+		return fmt.Errorf("couldn't remove the containers of %s; see `docker ps -a`", c.Name())
+	}
+	logf("Removed leftover containers for %s. Data in %s is kept.", c.Name(), c.StateDir())
 	return nil
 }

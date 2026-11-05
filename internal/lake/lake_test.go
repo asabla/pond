@@ -285,3 +285,16 @@ func TestMCPEnabled(t *testing.T) {
 		t.Error("mounted /mcp reported as disabled")
 	}
 }
+
+func TestRunPythonCancelsTheRunWhenStopped(t *testing.T) {
+	f, c := newFake(t)
+	f.runPolls = 1 << 30 // never finishes
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := c.RunPython(ctx, "seed", "/Shared/x.py", "while True: pass"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v", err)
+	}
+	if n := f.count("POST /api/2.2/jobs/runs/cancel"); n != 1 {
+		t.Errorf("cancel requests = %d", n)
+	}
+}

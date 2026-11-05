@@ -110,6 +110,11 @@ func TestOpenAndLogs(t *testing.T) {
 	if _, err := parse([]string{"logs", "--tail", "lots"}); err == nil {
 		t.Error("bad --tail accepted")
 	}
+	for _, p := range []string{"0", "-1", "70000"} {
+		if _, err := parse([]string{"--port", p}); err == nil {
+			t.Errorf("--port %s accepted", p)
+		}
+	}
 	if _, err := parse([]string{"down", "--port", "1"}); err == nil {
 		t.Error("--port accepted for down")
 	}

@@ -85,6 +85,7 @@ func TestImportRefusesUnsafeSnapshotsAndKeepsData(t *testing.T) {
 			var buf bytes.Buffer
 			gz := gzip.NewWriter(&buf)
 			tw := tar.NewWriter(gz)
+			tw.WriteHeader(&tar.Header{Name: snapshotMarker, Typeflag: tar.TypeReg, Mode: 0o644})
 			tw.WriteHeader(entry)
 			tw.Close()
 			gz.Close()
@@ -105,6 +106,27 @@ func TestImportRefusesUnsafeSnapshotsAndKeepsData(t *testing.T) {
 	}
 	if err := Import(ForDir(t.TempDir()), strings.NewReader("not gzip")); err == nil || !strings.Contains(err.Error(), "not a pond snapshot") {
 		t.Errorf("garbage: %v", err)
+	}
+}
+
+func TestImportRefusesArchivesPondDidNotMake(t *testing.T) {
+	for name, entries := range map[string][]string{"empty": nil, "foreign": {"README.md", "main.go"}} {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		for _, n := range entries {
+			tw.WriteHeader(&tar.Header{Name: n, Typeflag: tar.TypeReg, Mode: 0o644})
+		}
+		tw.Close()
+		gz.Close()
+		c := ForDir(filepath.Join(t.TempDir(), "proj"))
+		write(t, filepath.Join(c.DataPath(), "snapshot.json"), "keep")
+		if err := Import(c, &buf); err == nil || !strings.Contains(err.Error(), "not a pond snapshot") {
+			t.Errorf("%s: %v", name, err)
+		}
+		if b, _ := os.ReadFile(filepath.Join(c.DataPath(), "snapshot.json")); string(b) != "keep" {
+			t.Errorf("%s: data changed: %q", name, b)
+		}
 	}
 }
 

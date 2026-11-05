@@ -15,6 +15,10 @@ import (
 // DataPath is the lake's data on the host: everything MiniLake persists.
 func (c Context) DataPath() string { return filepath.Join(c.StateDir(), "data") }
 
+// snapshotMarker is the first entry of every snapshot, so import can refuse an
+// unrelated archive before it replaces the lake.
+const snapshotMarker = ".pond-snapshot"
+
 // cacheDirs hold downloads MiniLake can fetch again; snapshots leave them out.
 var cacheDirs = []string{".ivy2-cache"}
 
@@ -64,6 +68,13 @@ func Export(c Context, w io.Writer) error {
 	defer root.Close()
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
+	marker := []byte("pond snapshot 1\n")
+	if err := tw.WriteHeader(&tar.Header{Name: snapshotMarker, Mode: 0o644, Size: int64(len(marker)), Typeflag: tar.TypeReg}); err != nil {
+		return err
+	}
+	if _, err := tw.Write(marker); err != nil {
+		return err
+	}
 	err = filepath.WalkDir(c.DataPath(), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -76,7 +87,7 @@ func Export(c Context, w io.Writer) error {
 		if d.IsDir() && isCache(rel) {
 			return filepath.SkipDir
 		}
-		if rel == ".pond-mount" || (!d.IsDir() && !d.Type().IsRegular()) {
+		if rel == ".pond-mount" || rel == snapshotMarker || (!d.IsDir() && !d.Type().IsRegular()) {
 			return nil // skip the mount marker, symlinks, sockets and the like
 		}
 		info, err := d.Info()
@@ -190,13 +201,19 @@ func unpack(r io.Reader, dir string) error {
 	}
 	_ = os.Chmod(dir, 0o777) // MiniLake may write as another user, like the data folder it replaces
 	tr := tar.NewReader(gz)
-	for {
+	for first := true; ; first = false {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			if first {
+				return errors.New("not a pond snapshot: the archive is empty")
+			}
+			return os.Remove(filepath.Join(dir, snapshotMarker))
 		}
 		if err != nil {
 			return fmt.Errorf("not a pond snapshot: %w", err)
+		}
+		if first && hdr.Name != snapshotMarker {
+			return errors.New("not a pond snapshot: it wasn't made by `pond export`")
 		}
 		name := filepath.FromSlash(strings.TrimSuffix(hdr.Name, "/"))
 		if !filepath.IsLocal(name) {

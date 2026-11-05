@@ -296,6 +296,9 @@ func (c *Client) RunPython(ctx context.Context, name, path, source string) (*Run
 	for {
 		out, err := c.requestJSON(ctx, http.MethodGet, fmt.Sprintf("/api/2.2/jobs/runs/get?run_id=%d", runID), nil)
 		if err != nil {
+			if ctx.Err() != nil {
+				c.cancelRun(ctx, runID)
+			}
 			return nil, err
 		}
 		var run struct {
@@ -331,9 +334,18 @@ func (c *Client) RunPython(ctx context.Context, name, path, source string) (*Run
 			return res, nil
 		}
 		if err := sleep(ctx, runPollInterval); err != nil {
+			c.cancelRun(ctx, runID)
 			return nil, err
 		}
 	}
+}
+
+// cancelRun stops a run pond gave up waiting for, so it doesn't keep changing the lake.
+// It is best effort, and runs even though ctx is already cancelled.
+func (c *Client) cancelRun(ctx context.Context, runID int64) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_, _ = c.requestJSON(ctx, http.MethodPost, "/api/2.2/jobs/runs/cancel", map[string]any{"run_id": runID})
 }
 
 // Reset wipes the lake: catalogs, tables, files, jobs, queries and secrets.

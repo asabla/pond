@@ -377,15 +377,12 @@ func checkMount(ctx context.Context, c Context) error {
 
 // exitedError reports, with its last log lines, a MiniLake container that stopped.
 func exitedError(ctx context.Context, c Context) error {
-	running, err := docker(ctx, false, "inspect", "-f", "{{.State.Running}}", c.Container())
-	if err != nil {
-		return err
+	// Only a definite "false" is a crash; a failed inspect may just be docker hiccuping.
+	if running, err := docker(ctx, true, "inspect", "-f", "{{.State.Running}}", c.Container()); err == nil && running == "false" {
+		logs, _ := docker(ctx, false, "logs", "--tail", "30", c.Container())
+		return fmt.Errorf("MiniLake container exited during startup:\n%s", logs)
 	}
-	if running == "true" {
-		return nil
-	}
-	logs, _ := docker(ctx, false, "logs", "--tail", "30", c.Container())
-	return fmt.Errorf("MiniLake container exited during startup:\n%s", logs)
+	return nil
 }
 
 func waitHealthy(ctx context.Context, c Context, url string, timeout time.Duration) error {
