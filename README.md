@@ -221,7 +221,7 @@ The page registers its actions as tools on `navigator.modelContext` ([spec](http
 | Files | `list_files`, `read_file`, `write_file`, `delete_path`, `list_workspace`, `read_workspace_file`, `write_workspace_file` |
 | Admin | `list_warehouses`, `list_secrets`, `put_secret`, `reset_lake` |
 
-`drop_object`, `delete_path` and `reset_lake` open the same confirmation dialog a person gets, through `requestUserInteraction` when the browser provides it. If the user cancels, the tool fails with "The user declined." Secret values are never returned or shown in the activity log.
+`drop_object`, `delete_path` and `reset_lake` open the same confirmation dialog a person gets, through `requestUserInteraction` when the browser provides it. Tools also ask before they overwrite or delete in other ways: `run_sql` with a statement such as `DROP`, `DELETE`, `UPDATE` or `CREATE OR REPLACE`, imports in `replace` mode, and `write_file`, `write_workspace_file` or `put_secret` on something that already exists. If the user cancels, the tool fails with "The user declined." Secret values are never returned or shown in the activity log.
 
 In browsers without native WebMCP, load a WebMCP polyfill (for example MCP-B's `@mcp-b/global`) or call the same tools from `window.pond.tools`.
 

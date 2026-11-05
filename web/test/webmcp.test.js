@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { buildTools, registerWebMcp } from "../static/webmcp.js";
+import { buildTools, registerWebMcp, isDestructiveSql } from "../static/webmcp.js";
 import * as lake from "../static/lake.js";
 
 // A stand-in for the page: tools only reach the UI through this object.
@@ -63,6 +63,34 @@ test("destructive tools wait for requestUserInteraction when the agent offers it
   const client = { requestUserInteraction: async (fn) => (asked++, fn()) };
   assert.equal(await byName.reset_lake.execute({}, client), "The lake was reset.");
   assert.equal(asked, 1);
+});
+
+test("isDestructiveSql spots statements that delete or overwrite, past leading comments", () => {
+  for (const sql of ["DROP TABLE a", "  delete from a", "-- tidy up\nTRUNCATE a", "/* x */ CREATE OR REPLACE TABLE a AS SELECT 1", "insert  overwrite a select 1", "UPDATE a SET b = 1"]) {
+    assert.ok(isDestructiveSql(sql), sql);
+  }
+  for (const sql of ["SELECT 1", "CREATE TABLE a (b INT)", "INSERT INTO a VALUES (1)", "-- drop table a\nSELECT 1"]) {
+    assert.ok(!isDestructiveSql(sql), sql);
+  }
+});
+
+test("overwriting tools ask first, and stop when the user declines", async () => {
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+  const decline = { requestUserInteraction: async () => false };
+  const realFetch = globalThis.fetch;
+  let wrote = false;
+  globalThis.fetch = async (path, init = {}) => {
+    if ((init.method ?? "GET") === "PUT") wrote = true;
+    return new Response(JSON.stringify({ path: "/a.txt", file_size: 3 }), { status: 200 }); // the file exists
+  };
+  try {
+    await assert.rejects(byName.write_file.execute({ path: "/a.txt", content: "new" }, decline), { message: "The user declined." });
+    assert.equal(wrote, false);
+    await assert.rejects(byName.import_data.execute({ catalog: "c", schema: "s", table: "t", file_name: "../x.csv", content: "a" }), /plain file name/);
+    await assert.rejects(byName.drop_object.execute({ kind: "database", full_name: "a" }), /kind must be/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("graph tools validate their input before touching the page", async () => {

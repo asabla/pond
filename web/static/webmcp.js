@@ -5,6 +5,7 @@
 
 import { FULL_LOAD_EDGES, listGraphs, saveGraph } from "./graph.js";
 import { METRICS, GROUPINGS } from "./views/graph.js";
+import { confirmDialog } from "./dom.js";
 
 const DEFAULT_MAX_ROWS = 100;
 const READ_MAX_BYTES = 64 * 1024;
@@ -35,6 +36,14 @@ async function askUser(client, fn) {
   if (!ok) throw new Error("The user declined.");
 }
 
+// Asks the user before an agent replaces or deletes something.
+const confirmAgent = (client, title, body, confirm = "Allow") =>
+  askUser(client, () => confirmDialog({ title: `Agent wants to ${title}`, body, confirm }));
+
+// Statements that delete or overwrite data. Leading comments are skipped first.
+const DESTRUCTIVE_SQL = /^(drop|delete|truncate|alter|update|merge|insert\s+overwrite|create\s+or\s+replace)\b/i;
+export const isDestructiveSql = (sql) => DESTRUCTIVE_SQL.test(sql.replace(/^(\s*(--[^\n]*(\n|$)|\/\*[\s\S]*?\*\/))*\s*/, ""));
+
 function summarizeRun(run, output, lake) {
   return {
     run_id: run.run_id,
@@ -57,6 +66,7 @@ async function runResult(lake, runId, wait) {
 export function buildTools(ui) {
   const { lake, views } = ui;
   const wait = { type: "boolean", default: true, description: "Wait for the run to finish (up to 5 minutes) and return its output." };
+  const waitOff = { ...wait, default: false };
   const params = { type: "array", items: { type: "string" }, description: "Arguments passed to the script (sys.argv[1:])." };
 
   return [
@@ -162,6 +172,7 @@ export function buildTools(ui) {
       inputSchema: obj({ kind: { type: "string", enum: ["catalog", "schema", "table", "volume"] }, full_name: str("Name of the object, e.g. sales.raw.orders") }, ["kind", "full_name"]),
       annotations: { destructiveHint: true },
       execute: async ({ kind, full_name }, client) => {
+        if (!["catalog", "schema", "table", "volume"].includes(kind)) throw new Error("kind must be catalog, schema, table or volume.");
         await askUser(client, () => views.data.dropObject(kind, full_name, { byAgent: true }));
         return `Dropped ${kind} ${full_name}.`;
       },
@@ -177,7 +188,9 @@ export function buildTools(ui) {
         content: str("The file's text content"),
         mode: { type: "string", enum: ["create", "replace", "append"], default: "create" },
       }, ["catalog", "schema", "table", "file_name", "content"]),
-      execute: async ({ catalog, schema, table, file_name, content, mode = "create" }) => {
+      execute: async ({ catalog, schema, table, file_name, content, mode = "create" }, client) => {
+        if (typeof file_name !== "string" || /[/\\]|^\.\.?$/.test(file_name)) throw new Error("file_name must be a plain file name, without folders.");
+        if (mode === "replace") await confirmAgent(client, `replace table ${catalog}.${schema}.${table}`, "Its current rows are replaced by the imported file.", "Replace");
         const res = await lake.importFile({ data: new Blob([content]), fileName: file_name, catalog, schema, table, mode });
         await ui.refreshTree();
         ui.navigate("data", res.table);
@@ -192,7 +205,8 @@ export function buildTools(ui) {
         catalog: str("Catalog name"), schema: str("Schema name"), table: str("Table name"),
         mode: { type: "string", enum: ["create", "replace", "append"], default: "create" },
       }, ["path", "catalog", "schema", "table"]),
-      execute: async (input) => {
+      execute: async (input, client) => {
+        if (input.mode === "replace") await confirmAgent(client, `replace table ${input.catalog}.${input.schema}.${input.table}`, `Its current rows are replaced by ${input.path}.`, "Replace");
         const res = await lake.tableFromFile(input);
         await ui.refreshTree();
         ui.navigate("data", res.table);
@@ -209,10 +223,11 @@ export function buildTools(ui) {
         max_rows: { type: "integer", minimum: 0, maximum: 1000, default: DEFAULT_MAX_ROWS, description: "Rows to return to you. The user's grid shows up to 1000." },
       }, ["sql"]),
       annotations: { destructiveHint: true },
-      execute: async ({ sql, max_rows = DEFAULT_MAX_ROWS }) => {
+      execute: async ({ sql, max_rows = DEFAULT_MAX_ROWS }, client) => {
         if (typeof sql !== "string" || !sql.trim()) throw new Error("sql must be a non-empty SQL statement.");
         // Check before touching the editor, so a refused call leaves the user's SQL alone.
         if (views.query.running()) throw new Error("Another query is still running in the editor.");
+        if (isDestructiveSql(sql)) await confirmAgent(client, "run a statement that changes or deletes data", sql, "Run");
         views.query.setSql(sql);
         ui.navigate("query");
         const out = await views.query.runEditor({ byAgent: true });
@@ -274,7 +289,7 @@ export function buildTools(ui) {
     {
       name: "get_run",
       description: "A run's state and, once finished, its output logs. Shows the run to the user.",
-      inputSchema: obj({ run_id: { type: "integer" }, wait }, ["run_id"]),
+      inputSchema: obj({ run_id: { type: "integer" }, wait: waitOff }, ["run_id"]),
       execute: async ({ run_id, wait: w = false }) => {
         ui.navigate("jobs", "run", run_id);
         return runResult(lake, run_id, w);
@@ -325,15 +340,17 @@ export function buildTools(ui) {
       inputSchema: obj({ path: str("File path"), max_bytes: { type: "integer", minimum: 1, maximum: 1048576, default: READ_MAX_BYTES } }, ["path"]),
       annotations: READ,
       execute: async ({ path, max_bytes = READ_MAX_BYTES }) => {
-        const blob = await lake.readFile(path);
-        return { path, size: blob.size, truncated: blob.size > max_bytes, content: await blob.slice(0, max_bytes).text() };
+        const max = Math.min(1048576, Math.max(1, Math.trunc(Number(max_bytes)) || READ_MAX_BYTES));
+        const { size, truncated, text } = await lake.readHead(path, max);
+        return { path, size, truncated, content: text };
       },
     },
     {
       name: "write_file",
       description: "Write a text file to the lake's file system (overwrites), e.g. into a volume, and show its folder to the user.",
       inputSchema: obj({ path: str("File path, e.g. /Volumes/sales/raw/landing/notes.txt"), content: str("Text content") }, ["path", "content"]),
-      execute: async ({ path, content }) => {
+      execute: async ({ path, content }, client) => {
+        if (await lake.fileExists(path)) await confirmAgent(client, `overwrite ${path}`, "The file's current content is replaced.", "Overwrite");
         await lake.uploadFile(path, new Blob([content]));
         ui.navigate("files", "dbfs", ...path.split("/").filter(Boolean));
         return `Wrote ${content.length} characters to ${path}.`;
@@ -370,7 +387,8 @@ export function buildTools(ui) {
       name: "write_workspace_file",
       description: "Create or overwrite a Python script in the workspace and show it to the user.",
       inputSchema: obj({ path: str("Workspace path, e.g. /Shared/pond/etl.py"), source: str("Python source") }, ["path", "source"]),
-      execute: async ({ path, source }) => {
+      execute: async ({ path, source }, client) => {
+        if (await lake.workspaceExists(path)) await confirmAgent(client, `overwrite ${path}`, "The script's current source is replaced.", "Overwrite");
         await lake.importWorkspace(path, source);
         ui.navigate("files", "workspace", ...path.split("/").filter(Boolean));
         return `Saved ${path}.`;
@@ -483,7 +501,9 @@ export function buildTools(ui) {
       name: "put_secret",
       description: "Store a secret for jobs to use ({{secrets/scope/key}} or dbutils.secrets.get). Creates the scope if needed.",
       inputSchema: obj({ scope: str("Scope"), key: str("Key"), value: str("Secret value") }, ["scope", "key", "value"]),
-      execute: async ({ scope, key, value }) => {
+      execute: async ({ scope, key, value }, client) => {
+        const keys = await lake.listSecrets(scope).catch(() => []);
+        if (keys.some((s) => s.key === key)) await confirmAgent(client, `replace the secret ${scope}/${key}`, "Jobs that use it get the new value.", "Replace");
         await ui.views.admin.saveSecret(scope, key, value);
         return `Stored ${scope}/${key}.`;
       },

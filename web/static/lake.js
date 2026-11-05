@@ -54,7 +54,20 @@ export function config({ refresh = false } = {}) {
 
 /* ---------- Unity Catalog ---------- */
 
-export const listCatalogs = async () => (await call("GET", `${UC}/catalogs`)).catalogs ?? [];
+// Follows next_page_token, for APIs that page. MiniLake 1.9 returns everything at once.
+async function allPages(path, key) {
+  const out = [];
+  let token;
+  do {
+    const sep = path.includes("?") ? "&" : "?";
+    const page = await call("GET", token ? `${path}${sep}${q({ page_token: token })}` : path);
+    out.push(...(page[key] ?? []));
+    token = page.next_page_token;
+  } while (token);
+  return out;
+}
+
+export const listCatalogs = () => allPages(`${UC}/catalogs`, "catalogs");
 export const createCatalog = (name, comment) => call("POST", `${UC}/catalogs`, { name, comment: comment || undefined });
 export const deleteCatalog = (name) => call("DELETE", `${UC}/catalogs/${enc(name)}?force=true`);
 
@@ -157,6 +170,28 @@ export const deleteWarehouse = (id) => call("DELETE", `/api/2.0/sql/warehouses/$
 export const listDir = async (path) => (await call("GET", `/api/2.0/fs/directories/${fsPath(path)}`)).contents ?? [];
 export const makeDir = (path) => call("PUT", `/api/2.0/fs/directories/${fsPath(path)}`);
 export const deleteDir = (path) => call("DELETE", `/api/2.0/fs/directories/${fsPath(path)}`);
+/** @param {string} path */
+export async function fileExists(path) {
+  try {
+    await call("GET", `/api/2.0/dbfs/get-status?${q({ path })}`);
+    return true;
+  } catch (err) {
+    if (err.code === "RESOURCE_DOES_NOT_EXIST") return false;
+    throw err;
+  }
+}
+
+/** @param {string} path */
+export async function workspaceExists(path) {
+  try {
+    await call("GET", `/api/2.0/workspace/get-status?${q({ path })}`);
+    return true;
+  } catch (err) {
+    if (err.code === "RESOURCE_DOES_NOT_EXIST") return false;
+    throw err;
+  }
+}
+
 export const deleteFile = (path) => call("DELETE", `/api/2.0/fs/files/${fsPath(path)}`);
 
 // MiniLake only deletes empty directories, so empty them first.
@@ -183,6 +218,21 @@ export async function readFile(path) {
     throw new LakeError(body.message || `Read failed (${res.status})`, body.error_code);
   }
   return res.blob();
+}
+
+/**
+ * Reads the first maxBytes of a file as text, without downloading the rest: MiniLake
+ * ignores Range headers on the Files API, but the DBFS read API takes a length.
+ * @param {string} path
+ * @param {number} maxBytes
+ */
+export async function readHead(path, maxBytes) {
+  const [status, chunk] = await Promise.all([
+    call("GET", `/api/2.0/dbfs/get-status?${q({ path })}`),
+    call("GET", `/api/2.0/dbfs/read?${q({ path, offset: 0, length: maxBytes })}`),
+  ]);
+  const bytes = Uint8Array.from(atob(chunk.data ?? ""), (c) => c.charCodeAt(0));
+  return { size: status.file_size, truncated: status.file_size > bytes.length, text: new TextDecoder().decode(bytes) };
 }
 
 // SQL runs inside MiniLake, where files live under <data_root>/dbfs.
@@ -265,7 +315,7 @@ export async function importWorkspace(path, source, language = "PYTHON") {
 
 /* ---------- Jobs ---------- */
 
-export const listJobs = async () => (await call("GET", `${JOBS}/list?${q({ limit: 100, expand_tasks: true })}`)).jobs ?? [];
+export const listJobs = () => allPages(`${JOBS}/list?${q({ limit: 100, expand_tasks: true })}`, "jobs");
 export const getJob = (id) => call("GET", `${JOBS}/get?${q({ job_id: id })}`);
 export const deleteJob = (id) => call("POST", `${JOBS}/delete`, { job_id: Number(id) });
 export const runNow = (id) => call("POST", `${JOBS}/run-now`, { job_id: Number(id) });

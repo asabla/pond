@@ -1,5 +1,5 @@
 // Query: SQL editor, results, saved queries and the lake's query history.
-import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, fmtTime, fmtDuration, guard } from "../dom.js";
+import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, fmtTime, fmtDuration, guard, syncTabs } from "../dom.js";
 
 const GRID_MAX_ROWS = 1000;
 const DRAFT_KEY = "pond.draft";
@@ -13,7 +13,7 @@ export function createQueryView(ui) {
   const saveBtn = h("button", { class: "btn", onclick: guard(() => save()) }, "Save");
   const savedLabel = h("span", { class: "muted saved-label" });
   const results = h("div", { class: "results" });
-  const panelBody = h("div", { class: "panel-body" });
+  const panelBody = h("div", { class: "panel-body", id: "query-panel", role: "tabpanel" });
   const panelTabs = h("div", { class: "panel-tabs", role: "tablist" });
 
   const el = h("section", { class: "view query-view", "aria-label": "Query" },
@@ -112,15 +112,24 @@ export function createQueryView(ui) {
   /* ---------- Side panel ---------- */
 
   function renderPanelTabs() {
-    panelTabs.replaceChildren(...[["saved", "Saved"], ["history", "History"]].map(([key, label]) =>
-      h("button", { role: "tab", "aria-selected": String(state.panel === key), onclick: () => { state.panel = key; store("pond.queryPanel", key); renderPanelTabs(); renderPanel(); } }, label)));
+    syncTabs(panelTabs, [["saved", "Saved"], ["history", "History"]], state.panel, (key) => {
+      state.panel = key;
+      store("pond.queryPanel", key);
+      renderPanelTabs();
+      renderPanel();
+    }, "query-panel");
   }
 
+  let panelToken = 0;
+
   async function renderPanel() {
+    // Switching between Saved and History quickly must not let the slower list win.
+    const t = ++panelToken;
     panelBody.replaceChildren(loading());
     try {
       if (state.panel === "saved") {
         const queries = await lake.listSavedQueries();
+        if (t !== panelToken) return;
         panelBody.replaceChildren(...(queries.length ? queries.map((sq) => h("div", { class: "panel-item" },
           h("button", { class: "panel-open", title: sq.query_text, onclick: () => setSql(sq.query_text, { savedId: sq.id, name: sq.display_name }) },
             h("b", {}, sq.display_name), h("code", {}, sq.query_text.replace(/\s+/g, " "))),
@@ -132,6 +141,7 @@ export function createQueryView(ui) {
           }) }, "×"))) : [empty("No saved queries. Write one and press Save (⌘S).")]));
       } else {
         const history = await lake.queryHistory(50);
+        if (t !== panelToken) return;
         panelBody.replaceChildren(...(history.length ? history.map((e) => h("div", { class: "panel-item" },
           h("button", { class: "panel-open", title: e.query_text, onclick: () => setSql(e.query_text) },
             h("span", { class: `dot ${e.status === "FINISHED" ? "ok" : "err"}` }),
@@ -140,7 +150,7 @@ export function createQueryView(ui) {
               e.error_message && h("span", { class: "err-text" }, ` · ${e.error_message.split("\n")[0]}`))))) : [empty("No queries run yet.")]));
       }
     } catch (err) {
-      panelBody.replaceChildren(errorBox(err.message));
+      if (t === panelToken) panelBody.replaceChildren(errorBox(err.message));
     }
   }
 

@@ -184,4 +184,17 @@ test("saved graphs round-trip through the lake's files", async () => {
   await assert.rejects(g.saveGraph(lake, { edges_sql: "SELECT 1, 2" }), /needs a name/);
   await g.deleteGraph(lake, "a");
   assert.deepEqual((await g.listGraphs(lake)).map((x) => x.name), ["b graph"]);
+  // "b_graph" would share b graph's file name; it gets its own, and both survive.
+  await g.saveGraph(lake, { name: "b_graph", edges_sql: "SELECT 5, 6" });
+  assert.ok(files.has("/pond/graphs/b_graph-2.json"));
+  assert.deepEqual((await g.listGraphs(lake)).map((x) => x.name), ["b graph", "b_graph"]);
+  // Saving again overwrites the graph's own file.
+  await g.saveGraph(lake, { name: "b graph", edges_sql: "SELECT 7, 8" });
+  assert.equal((await g.listGraphs(lake)).find((x) => x.name === "b graph").edges_sql, "SELECT 7, 8");
+  assert.equal([...files.keys()].filter((p) => p.endsWith(".json") && !p.includes("junk")).length, 2);
+});
+
+test("definitionFromTables doesn't exclude a column twice when it is both id and label", () => {
+  const def = g.definitionFromTables({ edgeTable: "a.b.e", source: "s", target: "t", nodeTable: "a.b.n", nodeId: "name", label: "name" });
+  assert.match(def.nodes_sql, /EXCLUDE \("name"\)/);
 });

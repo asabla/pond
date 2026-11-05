@@ -1,7 +1,7 @@
 // Graph: network analytics over lake tables. Draws a graph defined by SQL with sigma.js,
 // computes metrics with graphology, and finds paths. Graphs too big to load open on their
 // best-connected nodes and grow by expanding nodes; paths then come from SQL.
-import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, guard } from "../dom.js";
+import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, guard, syncTabs } from "../dom.js";
 import * as G from "../graph.js";
 
 // replaceChildren, skipping the null and false a conditional child leaves behind.
@@ -102,7 +102,7 @@ export function createGraphView(ui) {
   const status = h("div", { class: "graph-status" });
   const toolbar = h("div", { class: "graph-toolbar" });
   const panelTabs = h("div", { class: "panel-tabs", role: "tablist" });
-  const panelBody = h("div", { class: "panel-body graph-panel-body" });
+  const panelBody = h("div", { class: "panel-body graph-panel-body", id: "graph-panel", role: "tabpanel" });
   const main = h("div", { class: "graph-main" }, toolbar, status, h("div", { class: "graph-canvas-wrap" }, stage, tableWrap, legend));
   const panel = h("aside", { class: "query-panel graph-panel" }, panelTabs, panelBody);
   const el = h("section", { class: "view graph-view", "aria-label": "Graph" }, main, panel);
@@ -738,8 +738,10 @@ export function createGraphView(ui) {
   const fmt = (v) => (typeof v !== "number" ? String(v) : Number.isInteger(v) ? v.toLocaleString() : v.toPrecision(3));
 
   function renderPanelTabs() {
-    put(panelTabs, ...[["node", "Node"], ["path", "Path"], ["stats", "Stats"]].map(([key, label]) =>
-      h("button", { role: "tab", "aria-selected": String(s.panel === key), onclick: () => ((s.panel = key), renderPanel()) }, label)));
+    syncTabs(panelTabs, [["node", "Node"], ["path", "Path"], ["stats", "Stats"]], s.panel, (key) => {
+      s.panel = key;
+      renderPanel();
+    }, "graph-panel");
   }
 
   async function renderPanel() {
@@ -748,8 +750,10 @@ export function createGraphView(ui) {
     if (s.panel === "node") return renderNodePanel();
     if (s.panel === "path") return renderPathPanel();
     put(panelBody, loading());
+    const graph = s.graph;
     try {
       const st = await stats();
+      if (s.panel !== "stats" || s.graph !== graph) return; // the user moved on meanwhile
       const rows = [
         ["Nodes", st.nodes], ["Edges", st.edges], ["Directed", st.directed ? "yes" : "no"], ["Weighted", st.weighted ? "yes" : "no"],
         ["Density", st.density], ["Average degree", st.average_degree], [st.directed ? "Weakly connected components" : "Connected components", st.components], ["Largest component", st.largest_component],
@@ -1101,6 +1105,11 @@ export function createGraphView(ui) {
     neighbors,
     select: (id) => select(findNode(G.keyOf(id)), { center: true }),
     style: async ({ size, color }) => {
+      if (size && size !== "none" && !Object.hasOwn(METRICS, size)) throw new Error(`Unknown size metric “${size}”. Use one of: none, ${Object.keys(METRICS).join(", ")}.`);
+      const attr = color?.startsWith("attr:") && color.slice(5);
+      if (color && color !== "none" && !Object.hasOwn(GROUPINGS, color) && !(attr && nodeAttributes().includes(attr))) {
+        throw new Error(`Unknown colour “${color}”. Use none, ${Object.keys(GROUPINGS).join(", ")}, or attr:<node column>.`);
+      }
       if (size) s.size = size;
       if (color) s.color = color;
       await restyle();

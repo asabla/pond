@@ -76,10 +76,27 @@ export function grid({ columns, rows }, { max = 1000 } = {}) {
  */
 export function table(rows, cols, { onRow, empty: emptyText = "Nothing here yet." } = {}) {
   if (!rows.length) return empty(emptyText);
+  // Clickable rows can be reached with Tab and opened with Enter or Space, and the
+  // opened row is marked selected.
+  const open = (tr, r) => {
+    for (const row of tr.parentElement.querySelectorAll("tr.selected")) row.classList.remove("selected");
+    tr.classList.add("selected");
+    onRow(r);
+  };
+  const rowProps = (r) => (onRow ? {
+    class: "clickable",
+    tabindex: "0",
+    onclick: (e) => !e.target.closest("button,a,input") && open(e.currentTarget, r),
+    onkeydown: (e) => {
+      if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        open(e.currentTarget, r);
+      }
+    },
+  } : {});
   return h("div", { class: "grid-wrap" }, h("table", { class: "grid list" },
     h("thead", {}, h("tr", {}, cols.map(([label]) => h("th", {}, label)))),
-    h("tbody", {}, rows.map((r) => h("tr", { class: onRow ? "clickable" : null, onclick: onRow && ((e) => !e.target.closest("button,a") && onRow(r)) },
-      cols.map(([, render]) => h("td", {}, render(r))))))));
+    h("tbody", {}, rows.map((r) => h("tr", rowProps(r), cols.map(([, render]) => h("td", {}, render(r))))))));
 }
 
 export function toCsv({ columns, rows }) {
@@ -107,6 +124,40 @@ export function snippet(text) {
 export const button = (label, onclick, kind = "") => h("button", { class: `btn ${kind}`, onclick }, label);
 
 // Wraps an async action: disables the button while running and shows failures as a toast.
+/**
+ * Fills a role="tablist" with tab buttons, or updates the ones already there, so a
+ * focused tab keeps focus. The selected tab is the one in the Tab order; the arrow
+ * keys, Home and End move between tabs, as the ARIA tabs pattern expects.
+ * @param {HTMLElement} list the tablist element
+ * @param {Array<[string, string]>} items [key, label] pairs
+ * @param {string} selected
+ * @param {(key: string) => void} onSelect
+ * @param {string} panelId id of the role="tabpanel" the tabs control
+ */
+export function syncTabs(list, items, selected, onSelect, panelId) {
+  const keyNav = (e) => {
+    const all = /** @type {HTMLElement[]} */ ([...list.querySelectorAll('[role="tab"]')]);
+    const i = all.indexOf(e.currentTarget);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: all.length - 1 }[e.key];
+    if (next == null) return;
+    e.preventDefault();
+    const target = all[(next + all.length) % all.length];
+    target.focus();
+    target.click();
+  };
+  if (list.querySelectorAll('[role="tab"]').length !== items.length) {
+    list.replaceChildren(...items.map(([key, label]) => h("button", {
+      role: "tab", id: `${panelId}-tab-${key}`, "aria-controls": panelId, onclick: () => onSelect(key), onkeydown: keyNav,
+    }, label)));
+  }
+  for (const [key] of items) {
+    const tab = /** @type {HTMLElement} */ (list.querySelector(`#${panelId}-tab-${key}`));
+    tab.setAttribute("aria-selected", String(key === selected));
+    tab.tabIndex = key === selected ? 0 : -1;
+  }
+  document.getElementById(panelId)?.setAttribute("aria-labelledby", `${panelId}-tab-${selected}`);
+}
+
 // Wraps an event handler so a failure shows as a toast instead of vanishing.
 export const guard = (fn) => async (...args) => {
   try {
@@ -168,7 +219,8 @@ export function formDialog({ title, intro, fields, submit = "Save", danger = fal
       const values = {};
       for (const f of fields) {
         const input = form.elements[f.name];
-        values[f.name] = f.type === "file" ? input.files[0] : f.type === "checkbox" ? input.checked : input.value.trim();
+        // Passwords and secrets keep their spaces: they may be part of the value.
+        values[f.name] = f.type === "file" ? input.files[0] : f.type === "checkbox" ? input.checked : f.type === "password" ? input.value : input.value.trim();
       }
       const problem = validate?.(values);
       if (problem) {

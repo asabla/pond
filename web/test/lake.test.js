@@ -19,6 +19,20 @@ beforeEach(() => {
   };
 });
 
+test("readHead asks DBFS for only the bytes it needs", async () => {
+  routes["GET /api/2.0/dbfs/get-status"] = () => [200, { file_size: 10 }];
+  routes["GET /api/2.0/dbfs/read"] = () => [200, { bytes_read: 4, data: btoa("abcd") }];
+  assert.deepEqual(await lake.readHead("/Volumes/a b/x.txt", 4), { size: 10, truncated: true, text: "abcd" });
+  const read = calls.find((c) => c.path.startsWith("/api/2.0/dbfs/read"));
+  assert.equal(read.path, "/api/2.0/dbfs/read?path=%2FVolumes%2Fa+b%2Fx.txt&offset=0&length=4");
+});
+
+test("listJobs follows next_page_token", async () => {
+  routes["GET /api/2.2/jobs/list"] = (_, path) =>
+    path.includes("page_token=p2") ? [200, { jobs: [{ job_id: 2 }] }] : [200, { jobs: [{ job_id: 1 }], next_page_token: "p2" }];
+  assert.deepEqual((await lake.listJobs()).map((j) => j.job_id), [1, 2]);
+});
+
 test("quoteName backtick-quotes each part and escapes backticks", () => {
   assert.equal(lake.quoteName("shop.raw.orders"), "`shop`.`raw`.`orders`");
   assert.equal(lake.quoteName("a`b.c"), "`a``b`.`c`");

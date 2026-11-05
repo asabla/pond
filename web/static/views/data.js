@@ -18,7 +18,8 @@ export function createDataView(ui) {
       el.classList.add("dropping");
     }
   });
-  el.addEventListener("dragleave", (e) => e.target === el && el.classList.remove("dropping"));
+  // dragleave also fires when moving between children; only clear when leaving the view.
+  el.addEventListener("dragleave", (e) => !el.contains(e.relatedTarget) && el.classList.remove("dropping"));
   el.addEventListener("drop", (e) => {
     e.preventDefault();
     el.classList.remove("dropping");

@@ -25,7 +25,9 @@ const NAME = /^[A-Za-z0-9_][A-Za-z0-9_. -]{0,79}$/;
 export function validateDefinition(def) {
   if (!def || typeof def !== "object") return "A graph definition is an object.";
   if (def.name != null && !NAME.test(def.name)) return "Graph names use letters, digits, spaces, dots, dashes and underscores.";
-  if (!def.edges_sql?.trim()) return "edges_sql is required: a query whose first two columns are source and target.";
+  if (def.name != null && typeof def.name !== "string") return "name must be a string.";
+  if (def.nodes_sql != null && typeof def.nodes_sql !== "string") return "nodes_sql must be a string.";
+  if (typeof def.edges_sql !== "string" || !def.edges_sql.trim()) return "edges_sql is required: a query whose first two columns are source and target.";
   return null;
 }
 
@@ -44,7 +46,7 @@ export function definitionFromTables({ name, edgeTable, source, target, weight, 
   if (weight) cols.push(`${quoteIdent(weight)} AS weight`);
   const def = { name, directed, edges_sql: `SELECT ${cols.join(", ")}\nFROM ${quoteTable(edgeTable)}` };
   if (nodeTable && nodeId) {
-    const used = [nodeId, label].filter(Boolean).map(quoteIdent);
+    const used = [...new Set([nodeId, label].filter(Boolean))].map(quoteIdent);
     def.nodes_sql = `SELECT ${quoteIdent(nodeId)} AS id${label ? `, ${quoteIdent(label)} AS label` : ""}, * EXCLUDE (${used.join(", ")})\nFROM ${quoteTable(nodeTable)}`;
   }
   return def;
@@ -263,32 +265,49 @@ function join([fwd, bwd], meet) {
 
 /* ---------- Saved graphs (JSON files in the lake) ---------- */
 
-const graphPath = (name) => `${GRAPHS_DIR}/${name.replace(/[^\w.-]+/g, "_")}.json`;
+// A file name for a new graph. Names that differ only in punctuation ("a b", "a_b")
+// would share a file, so saveGraph checks the folder and adds a number when needed.
+const fileBase = (name) => name.replace(/[^\w.-]+/g, "_");
 
-export async function listGraphs(lake) {
+async function graphFiles(lake) {
   let entries;
   try {
     entries = await lake.listDir(GRAPHS_DIR);
   } catch {
     return []; // the folder appears with the first saved graph
   }
-  const graphs = [];
+  const files = [];
   for (const e of entries.filter((x) => !x.is_directory && x.path.endsWith(".json"))) {
     try {
-      graphs.push(normalize(JSON.parse(await (await lake.readFile(e.path)).text())));
+      files.push({ path: e.path, def: normalize(JSON.parse(await (await lake.readFile(e.path)).text())) });
     } catch {
       // skip files that aren't graph definitions
     }
   }
-  return graphs.filter((g) => g.name).sort((a, b) => a.name.localeCompare(b.name));
+  return files.filter((f) => f.def.name);
+}
+
+export async function listGraphs(lake) {
+  return (await graphFiles(lake)).map((f) => f.def).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function saveGraph(lake, def) {
   const problem = validateDefinition(def) || (!def.name && "A saved graph needs a name.");
   if (problem) throw new Error(problem);
   const g = normalize(def);
-  await lake.uploadFile(graphPath(g.name), new Blob([JSON.stringify(g, null, 2)], { type: "application/json" }));
+  const files = await graphFiles(lake);
+  // Overwrite the graph's own file; otherwise pick a file name no other graph uses.
+  let path = files.find((f) => f.def.name === g.name)?.path;
+  for (let i = 1; !path; i++) {
+    const candidate = `${GRAPHS_DIR}/${fileBase(g.name)}${i > 1 ? `-${i}` : ""}.json`;
+    if (!files.some((f) => f.path === candidate)) path = candidate;
+  }
+  await lake.uploadFile(path, new Blob([JSON.stringify(g, null, 2)], { type: "application/json" }));
   return g;
 }
 
-export const deleteGraph = (lake, name) => lake.deleteFile(graphPath(name));
+export async function deleteGraph(lake, name) {
+  const file = (await graphFiles(lake)).find((f) => f.def.name === name);
+  if (!file) throw new Error(`No saved graph named “${name}”.`);
+  await lake.deleteFile(file.path);
+}

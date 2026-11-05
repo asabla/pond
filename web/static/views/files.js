@@ -25,7 +25,8 @@ export function createFilesView(ui) {
       el.classList.add("dropping");
     }
   });
-  el.addEventListener("dragleave", (e) => e.target === el && el.classList.remove("dropping"));
+  // dragleave also fires when moving between children; only clear when leaving the view.
+  el.addEventListener("dragleave", (e) => !el.contains(e.relatedTarget) && el.classList.remove("dropping"));
   el.addEventListener("drop", (e) => {
     e.preventDefault();
     el.classList.remove("dropping");
@@ -107,7 +108,6 @@ export function createFilesView(ui) {
 
   async function select(entry) {
     current.selected = entry;
-    for (const row of el.querySelectorAll("tr.selected")) row.classList.remove("selected");
     const box = el.querySelector("#file-preview");
     box.replaceChildren(h("div", { class: "section" }, loading()));
     const dataFormat = lake.formatOf(entry.name);
@@ -117,9 +117,8 @@ export function createFilesView(ui) {
       if (dataFormat) {
         body = grid(await lake.runSql(await lake.selectFromFile(entry.path, 50)));
       } else if (TEXT_EXT.test(entry.name) || entry.file_size < 4096) {
-        const blob = await lake.readFile(entry.path);
-        const text = await blob.slice(0, TEXT_PREVIEW_BYTES).text();
-        body = h("pre", { class: "logs" }, text, blob.size > TEXT_PREVIEW_BYTES && "\n… (truncated)");
+        const { text, truncated } = await lake.readHead(entry.path, TEXT_PREVIEW_BYTES);
+        body = h("pre", { class: "logs" }, text, truncated && "\n… (truncated)");
       } else body = empty("No preview for this file type.");
     } catch (err) {
       body = errorBox(err.message);
@@ -177,7 +176,11 @@ export function createFilesView(ui) {
   async function newFolder() {
     const v = await formDialog({ title: `New folder in ${current.path}`, fields: [{ name: "name", label: "Name", required: true, pattern: "[^/]+" }], submit: "Create" });
     if (!v) return;
-    await lake.makeDir(joinPath(current.path, v.name)).catch((err) => toast(err.message, "err"));
+    try {
+      await lake.makeDir(joinPath(current.path, v.name));
+    } catch (err) {
+      return toast(err.message, "err");
+    }
     go("dbfs", joinPath(current.path, v.name));
   }
 
@@ -201,11 +204,10 @@ export function createFilesView(ui) {
   async function workspacePage(live) {
     let objects;
     let file = null;
-    try {
-      objects = await lake.listWorkspace(current.path);
-      // MiniLake lists a file path as itself; treat that as opening the file.
-      if (objects.length === 1 && objects[0].path === current.path && objects[0].object_type !== "DIRECTORY") throw new Error("file");
-    } catch {
+    objects = await lake.listWorkspace(current.path);
+    // MiniLake lists a file path as itself; treat that as opening the file. Other errors
+    // (a missing folder, MiniLake down) propagate to the error box.
+    if (objects.length === 1 && objects[0].path === current.path && objects[0].object_type !== "DIRECTORY") {
       file = current.path;
       current.path = parentOf(file);
       objects = await lake.listWorkspace(current.path);
