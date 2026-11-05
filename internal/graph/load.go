@@ -26,7 +26,7 @@ func (s *Service) load(ctx context.Context, e *engine, def Definition, scope str
 		if err != nil {
 			return nil, err
 		}
-		res, err := s.lake.QuerySQL(ctx, sql, maxRows, budget)
+		res, err := s.lake.QuerySQL(ctx, "/* pond:system */ "+sql, maxRows, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +137,7 @@ func (s *Service) load(ctx context.Context, e *engine, def Definition, scope str
 	if def.NodesSQL != "" {
 		var filter any
 		if l.scope != "full" {
-			nhead, err := s.lake.QuerySQL(ctx, "SELECT * FROM (\n"+def.NodesSQL+"\n) AS n LIMIT 0", 0, budget)
+			nhead, err := s.lake.QuerySQL(ctx, "/* pond:system */ "+"SELECT * FROM (\n"+def.NodesSQL+"\n) AS n LIMIT 0", 0, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -183,12 +183,12 @@ func (s *Service) sqlPath(ctx context.Context, e *engine, def Definition, column
 		if err != nil {
 			return nil, err
 		}
-		res, err := s.lake.QuerySQL(ctx, sql, 1, MaxBytes)
+		res, err := s.lake.QuerySQL(ctx, "/* pond:system */ "+sql, 1, MaxBytes)
 		if err != nil {
 			return nil, err
 		}
 		if len(res.Rows) == 0 && def.NodesSQL != "" {
-			head, err := s.lake.QuerySQL(ctx, "SELECT * FROM (\n"+def.NodesSQL+"\n) AS n LIMIT 0", 0, MaxBytes)
+			head, err := s.lake.QuerySQL(ctx, "/* pond:system */ "+"SELECT * FROM (\n"+def.NodesSQL+"\n) AS n LIMIT 0", 0, MaxBytes)
 			if err != nil {
 				return nil, err
 			}
@@ -199,7 +199,7 @@ func (s *Service) sqlPath(ctx context.Context, e *engine, def Definition, column
 			if err != nil {
 				return nil, err
 			}
-			res, err = s.lake.QuerySQL(ctx, sql, MaxNodes, MaxBytes)
+			res, err = s.lake.QuerySQL(ctx, "/* pond:system */ "+sql, MaxNodes, MaxBytes)
 			if err != nil {
 				return nil, err
 			}
@@ -214,7 +214,7 @@ func (s *Service) sqlPath(ctx context.Context, e *engine, def Definition, column
 	}
 	budget := MaxBytes
 	if err := options.ToObject(e.vm).Set("runSql", func(call goja.FunctionCall) goja.Value {
-		rows, err := s.lake.QuerySQL(ctx, call.Argument(0).String(), 1000000, budget)
+		rows, err := s.lake.QuerySQL(ctx, "/* pond:system */ "+call.Argument(0).String(), 1000000, budget)
 		if err != nil {
 			panic(e.vm.NewGoError(err))
 		}
@@ -250,7 +250,7 @@ func (s *Service) sqlPath(ctx context.Context, e *engine, def Definition, column
 		nodes[i] = map[string]any{"node": id, "label": fmt.Sprint(id)}
 	}
 	if def.NodesSQL != "" {
-		head, err := s.lake.QuerySQL(ctx, "SELECT * FROM (\n"+def.NodesSQL+"\n) AS n LIMIT 0", 0, budget)
+		head, err := s.lake.QuerySQL(ctx, "/* pond:system */ "+"SELECT * FROM (\n"+def.NodesSQL+"\n) AS n LIMIT 0", 0, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -261,7 +261,7 @@ func (s *Service) sqlPath(ctx context.Context, e *engine, def Definition, column
 		if err != nil {
 			return nil, err
 		}
-		rows, err := s.lake.QuerySQL(ctx, sql, MaxNodes, budget)
+		rows, err := s.lake.QuerySQL(ctx, "/* pond:system */ "+sql, MaxNodes, budget)
 		if err != nil {
 			return nil, err
 		}

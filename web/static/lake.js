@@ -35,6 +35,7 @@ export class LakeError extends Error {
  */
 export function createLake(base = "") {
   let configPromise;
+  let dataRootPromise;
 
 
   async function call(method, path, body) {
@@ -182,10 +183,12 @@ export function createLake(base = "") {
   }
 
   const previewTable = (fullName, limit = 100) =>
-    runSql(`SELECT * FROM ${quoteName(fullName)} LIMIT ${Math.max(1, Math.min(10000, limit | 0))}`);
+    runSql(`/* pond:system */ SELECT * FROM ${quoteName(fullName)} LIMIT ${Math.max(1, Math.min(10000, limit | 0))}`);
 
-  const queryHistory = async (max = 50) =>
-    (await call("GET", `/api/2.0/sql/history/queries?${q({ max_results: max })}`)).res ?? [];
+  const queryHistory = async (max = 50, { includeBackground = false } = {}) => {
+    const rows = (await call("GET", `/api/2.0/sql/history/queries?${q({ max_results: Math.max(100, max) })}`)).res ?? [];
+    return rows.filter((row) => includeBackground || !row.query_text?.trimStart().startsWith("/* pond:system */")).slice(0, max);
+  };
 
   const listSavedQueries = async () => (await call("GET", "/api/2.0/sql/queries")).results ?? [];
   // Saving under an existing name updates that query; MiniLake rejects duplicate names.
@@ -273,10 +276,22 @@ export function createLake(base = "") {
     return { size: status.file_size, truncated: status.file_size > bytes.length, text: new TextDecoder().decode(bytes) };
   }
 
-  // SQL runs inside MiniLake, where files live under <data_root>/dbfs.
+  // SQL reads the engine's physical paths. UC volumes have a separate root from DBFS.
   async function sqlPath(path) {
-    const { data_root } = await config();
-    return `${data_root ?? "data"}/dbfs${path}`;
+    let { data_root: root } = await config();
+    if (!root) {
+      // External services do not expose their root through the HTTP configuration.
+      // MiniLake's SQL connection attaches its persistent Unity Catalog database.
+      dataRootPromise ??= runSql("/* pond:system */ PRAGMA database_list").then((result) => {
+        const file = result.columns.findIndex((column) => column.name === "file");
+        const match = result.rows.map((row) => String(row[file] ?? "").match(/^(.*)\/(?:unity_catalog\.duckdb|warehouses\/[^/]+\.duckdb)$/)).find(Boolean);
+        if (!match) throw new LakeError("Cannot find the external MiniLake data directory. Check the service's persistent database configuration.");
+        return match[1];
+      }).catch((err) => { dataRootPromise = undefined; throw err; });
+      root = await dataRootPromise;
+    }
+    const normalized = "/" + path.replace(/^\/+/, "");
+    return normalized.startsWith("/Volumes/") ? `${root}/volumes/${normalized.slice(9)}` : `${root}/dbfs${normalized}`;
   }
 
   /* ---------- Data import ---------- */
@@ -308,7 +323,7 @@ export function createLake(base = "") {
       ? `INSERT INTO ${target} SELECT * FROM ${source}`
       : `CREATE ${mode === "replace" ? "OR REPLACE " : ""}TABLE ${target} AS SELECT * FROM ${source}`;
     await runSql(statement);
-    const count = await runSql(`SELECT count(*) FROM ${target}`);
+    const count = await runSql(`/* pond:system */ SELECT count(*) FROM ${target}`);
     return { table: `${catalog}.${schema}.${table}`, path, rows: count.rows[0]?.[0] };
   }
 
@@ -320,11 +335,13 @@ export function createLake(base = "") {
   async function importFile({ file, data, fileName, catalog, schema, table, volume = IMPORT_VOLUME, mode = "create" }) {
     fileName ??= file?.name;
     if (!formatOf(fileName)) throw new LakeError(`Unsupported file type: ${fileName}. Use CSV, TSV, JSON, JSONL or Parquet.`);
+    if (!(await listCatalogs()).some((c) => c.name === catalog)) await createCatalog(catalog);
+    if (!(await listSchemas(catalog)).some((s) => s.name === schema)) await createSchema(catalog, schema);
     if (!(await listVolumes(catalog, schema)).some((v) => v.name === volume)) {
       await createVolume(catalog, schema, volume, "Files imported with Pond");
     }
-    const path = `${volumePath(`${catalog}.${schema}.${volume}`)}/${fileName}`;
-    await uploadFile(path, file ?? data);
+    const path = `${volumePath(`${catalog}.${schema}.${volume}`)}/${crypto.randomUUID()}-${fileName}`;
+    await uploadFile(path, file ?? data, { overwrite: false });
     return tableFromFile({ path, catalog, schema, table, mode });
   }
 
@@ -452,6 +469,11 @@ export function createLake(base = "") {
   return {
     base,
     config,
+    health: async () => {
+      const response = await fetch(base + "/pond/health", { signal: AbortSignal.timeout(5000) });
+      if (!response.ok) throw new LakeError(`Pond health check failed (${response.status})`);
+      return response.json();
+    },
     listCatalogs,
     createCatalog,
     deleteCatalog,

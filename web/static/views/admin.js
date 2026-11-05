@@ -1,6 +1,6 @@
 // @ts-check
 // Settings: the context, connecting agents, warehouses, secrets, and resetting the lake.
-import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, snippet, fmtTime } from "../dom.js";
+import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, snippet, fmtTime, shellQuote } from "../dom.js";
 
 export function createAdminView(ui) {
   const { lake } = ui;
@@ -16,7 +16,7 @@ export function createAdminView(ui) {
     const t = ++token;
     page(loading());
     try {
-      const [cfg, warehouses, scopes] = await Promise.all([lake.config(), lake.listWarehouses(), lake.listScopes()]);
+      const [cfg, warehouses, scopes] = await Promise.all([lake.config(), lake.listWarehouses().catch(() => []), lake.listScopes().catch(() => [])]);
       const secrets = Object.fromEntries(await Promise.all(scopes.map(async (s) => [s.name, await lake.listSecrets(s.name).catch(() => [])])));
       if (t !== token) return;
       render({ cfg, warehouses, scopes, secrets });
@@ -39,7 +39,29 @@ export function createAdminView(ui) {
           h("dt", {}, "MiniLake"), h("dd", {}, cfg.minilake_url),
           cfg.version && [h("dt", {}, "Pond"), h("dd", {}, cfg.version)])
         : h("p", { class: "help" }, `Attached to a MiniLake pond does not manage: ${cfg.minilake_url}`)),
-      ctx && h("div", { class: "help" }, "Container logs:", snippet(`docker logs -f ${ctx.container}`)),
+      ctx && h("div", { class: "help" }, "Container logs:", snippet(`pond logs ${shellQuote(ctx.dir)} -f`)),
+
+      section("Runtime and recovery", null,
+        h("dl", { class: "kv" },
+          h("dt", {}, "Runtime"), h("dd", {}, cfg.runtime?.provider ?? "External MiniLake"),
+          h("dt", {}, "Engine"), h("dd", {}, cfg.runtime?.kind ?? "external"),
+          cfg.runtime?.version && [h("dt", {}, "Engine version"), h("dd", {}, cfg.runtime.version)],
+          cfg.runtime?.image && [h("dt", {}, "MiniLake image"), h("dd", {}, cfg.runtime.image)],
+          cfg.runtime?.connection && [h("dt", {}, "Connection"), h("dd", {}, cfg.runtime.connection)],
+          h("dt", {}, "Job execution"), h("dd", {}, cfg.capabilities?.jobs ?? "Unknown; check the service configuration")),
+        h("p", { class: "help", role: "status", id: `health-${ui.uid}` }, "Use Check connection to test Pond and MiniLake without running a job."),
+        action("Check connection", async () => {
+          const health = await lake.health();
+          el.querySelector(`#health-${ui.uid}`).textContent = health.error ?? "Pond and MiniLake respond. Job execution has not been tested by this check.";
+        }, "", false),
+        ctx ? [snippet(`pond doctor ${shellQuote(ctx.dir)}`),
+          h("p", { class: "help" }, "The terminal owns this context. Stop it before taking a data snapshot. A snapshot contains lake data, saved queries, graphs, scripts, jobs, runs and secrets. Keep the snapshot private."),
+          snippet(`pond down ${shellQuote(ctx.dir)}`),
+          snippet(`pond export ${shellQuote(ctx.dir)} -o lake.pond.tar.gz`),
+          h("p", { class: "help" }, "Restore into a stopped context. Import replaces its data and asks for confirmation."),
+          snippet(`pond import lake.pond.tar.gz ${shellQuote(ctx.dir)}`)]
+          : h("p", { class: "help" }, "This external service owns its start, stop, job runtime and backups. Use the service owner's backup procedure."),
+        h("p", { class: "help" }, "Drafts, closed-tab recovery and open tabs stay in this browser at this address. Saved objects and query/run history live in the lake. Page activity clears on reload. Export query and graph definitions or scripts to keep them in project files.")),
 
       ui.mcpUrl && section("Connect an agent", null,
         h("p", { class: "help" }, "Each context has its own MCP server. Register it under the context's name in Claude Code, Claude Desktop, Codex or another MCP client."),
@@ -97,16 +119,14 @@ export function createAdminView(ui) {
   }
 
   async function newWarehouse() {
-    const v = await formDialog({ title: "New SQL warehouse", fields: [{ name: "name", label: "Name", required: true }], submit: "Create" });
+    const v = await formDialog({ title: "New SQL warehouse", fields: [{ name: "name", label: "Name", required: true }], submit: "Create", onSubmit: async (values) => lake.createWarehouse(values.name) });
     if (!v) return;
-    await lake.createWarehouse(v.name).catch((err) => toast(err.message, "err"));
     show();
   }
 
   async function newScope() {
-    const v = await formDialog({ title: "New secret scope", fields: [{ name: "scope", label: "Scope", required: true, pattern: "[\\w.\\-]+" }], submit: "Create" });
+    const v = await formDialog({ title: "New secret scope", fields: [{ name: "scope", label: "Scope", required: true, pattern: "[\\w.\\-]+" }], submit: "Create", onSubmit: async (values) => lake.createScope(values.scope) });
     if (!v) return;
-    await lake.createScope(v.scope).catch((err) => toast(err.message, "err"));
     show();
   }
 
@@ -119,10 +139,10 @@ export function createAdminView(ui) {
         { name: "value", label: "Value", type: "password", required: true },
       ].filter(Boolean),
       submit: "Save secret",
+      onSubmit: async (values) => saveSecret(scope ?? values.scope, values.key, values.value),
     });
     if (!v) return;
     try {
-      await saveSecret(scope ?? v.scope, v.key, v.value);
       openScopes.add(scope ?? v.scope);
       toast("Secret saved");
       show();

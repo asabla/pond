@@ -337,6 +337,7 @@ export function buildTools(ui) {
       inputSchema: obj({ name: str("Job name"), source: str("Python source"), parameters: params }, ["name", "source"]),
       execute: async ({ name, source, parameters }) => {
         const res = await lake.createScriptJob(name, source, parameters);
+        await ui.refreshTree();
         ui.navigate("jobs", "job", res.job_id);
         return res;
       },

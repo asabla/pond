@@ -1,5 +1,6 @@
 // @ts-check
 // Files: the lake's file system (DBFS root, including /Volumes) and the workspace.
+import { createDraft } from "../drafts.js";
 import { createCodeEditor } from "../editor.js";
 import { h, grid, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, download, fmtTime, fmtBytes } from "../dom.js";
 
@@ -55,7 +56,7 @@ export function createFilesView(ui) {
 
   function rootTabs() {
     return h("div", { class: "subtabs" },
-      [["dbfs", "Files", "Volumes and DBFS"], ["workspace", "Workspace", "Scripts and notebooks"]].map(([key, label, title]) =>
+      [["dbfs", "Files", "Data files and volumes"], ["workspace", "Scripts", "Workspace scripts and notebooks"]].map(([key, label, title]) =>
         h("a", { href: `#/files/${key}`, title, "aria-current": String(current.root === key) }, label)));
   }
 
@@ -117,7 +118,7 @@ export function createFilesView(ui) {
     let body;
     try {
       if (dataFormat) {
-        body = grid(await lake.runSql(await lake.selectFromFile(entry.path, 50)));
+        body = grid(await lake.runSql(`/* pond:system */ ${await lake.selectFromFile(entry.path, 50)}`));
       } else if (TEXT_EXT.test(entry.name) || entry.file_size < 4096) {
         const { text, truncated } = await lake.readHead(entry.path, TEXT_PREVIEW_BYTES);
         body = h("pre", { class: "logs" }, text, truncated && "\n… (truncated)");
@@ -140,6 +141,7 @@ export function createFilesView(ui) {
     const options = [];
     for (const c of await lake.listCatalogs()) for (const s of await lake.listSchemas(c.name)) options.push(`${c.name}.${s.name}`);
     if (!options.length) return toast("Create a catalog first.", "err");
+    let loaded = /** @type {any} */ (null);
     const v = await formDialog({
       title: `Create table from ${entry.name}`,
       fields: [
@@ -149,17 +151,16 @@ export function createFilesView(ui) {
           { value: "create", label: "Fail" }, { value: "replace", label: "Replace it" }, { value: "append", label: "Append rows" }] },
       ],
       submit: "Create table",
+      onSubmit: async (values) => {
+        const [catalog, schema] = values.target.split(".");
+        if (values.mode === "replace" && !await confirmDialog({ title: `Replace ${values.target}.${values.table} in ${ui.ctx?.name ?? "this lake"}?`, body: `Its rows are replaced by ${entry.path}.`, confirm: "Replace" })) throw new Error("Replacement cancelled. Choose another mode.");
+        loaded = await lake.tableFromFile({ path: entry.path, catalog, schema, table: values.table, mode: values.mode });
+      },
     });
     if (!v) return;
-    const [catalog, schema] = v.target.split(".");
-    try {
-      const res = await lake.tableFromFile({ path: entry.path, catalog, schema, table: v.table, mode: v.mode });
-      toast(`Loaded ${res.rows} rows into ${res.table}`);
-      await ui.refreshTree();
-      ui.navigate("data", res.table);
-    } catch (err) {
-      toast(err.message, "err");
-    }
+    toast(`Loaded ${loaded.rows} rows into ${loaded.table}`);
+    await ui.refreshTree();
+    ui.navigate("data", loaded.table);
   }
 
   async function upload(files) {
@@ -183,13 +184,8 @@ export function createFilesView(ui) {
   }
 
   async function newFolder() {
-    const v = await formDialog({ title: `New folder in ${current.path}`, fields: [{ name: "name", label: "Name", required: true, pattern: "[^\\/]+" }], submit: "Create" });
+    const v = await formDialog({ title: `New folder in ${current.path}`, fields: [{ name: "name", label: "Name", required: true, pattern: "[^\\/]+" }], submit: "Create", onSubmit: async (values) => lake.makeDir(joinPath(current.path, values.name)) });
     if (!v) return;
-    try {
-      await lake.makeDir(joinPath(current.path, v.name));
-    } catch (err) {
-      return toast(err.message, "err");
-    }
     go("dbfs", joinPath(current.path, v.name));
   }
 
@@ -255,39 +251,52 @@ export function createFilesView(ui) {
     box.replaceChildren(h("div", { class: "section" }, loading()));
     const source = await lake.exportWorkspace(path).catch((err) => (box.replaceChildren(errorBox(err.message)), null));
     if (source == null) return;
-    const code = createCodeEditor({ language: "python", value: source, label: path, className: "script-editor" });
+    const draft = createDraft(`pond.objectDraft.${ui.ctx?.id ?? "self"}.workspace.${path}`, source);
+    if (!draft.dirty) draft.saved(source);
+    const code = createCodeEditor({ language: "python", value: draft.value, label: path, className: "script-editor" });
     const editor = code.input;
+    const draftStatus = h("p", { class: "help", role: "status" });
+    const track = () => { draft.change(editor.value); const message = draft.dirty ? "Unsaved changes. Draft kept in this browser." : "Saved in the lake."; if (draftStatus.textContent !== message) draftStatus.textContent = message; };
+    editor.addEventListener("input", track);
+    track();
+    const save = async () => {
+      const remote = await lake.exportWorkspace(path);
+      if (draft.conflicts(remote)) throw new Error("The saved script changed. Your draft is kept. Export it or use Save as to keep both versions.");
+      const value = editor.value;
+      await lake.importWorkspace(path, value, info?.language ?? "PYTHON");
+      draft.saved(value);
+      track();
+    };
     const isPython = /\.py$/.test(path) || info?.language === "PYTHON";
     box.replaceChildren(h("div", { class: "section preview" },
       h("div", { class: "title-row" }, h("h2", {}, baseName(path)), h("div", { class: "actions" },
+        button("Export script", () => download(baseName(path), editor.value, "text/plain")),
+        button("Save as…", () => newScript(editor.value)),
         action("Save", async () => {
-          await lake.importWorkspace(path, editor.value, info?.language ?? "PYTHON");
+          await save();
           toast("Saved");
         }),
-        isPython && action("Run", async () => {
-          await lake.importWorkspace(path, editor.value, info?.language ?? "PYTHON");
+        isPython && action("Save & run", async () => {
+          await save();
           const { run_id } = await lake.submitFile(baseName(path), path, []);
           ui.navigate("jobs", "run", run_id);
         }, "primary"))),
       h("p", { class: "context-dir mono" }, path),
-      code.el));
+      code.el, draftStatus));
   }
 
-  async function newScript() {
+  async function newScript(source = "# New script\n") {
     const v = await formDialog({
       title: `New script in ${current.path}`,
       fields: [{ name: "name", label: "File name", required: true, value: "script.py", pattern: "[^\\/]+" }],
       submit: "Create",
+      onSubmit: async (values) => {
+        const path = joinPath(current.path, values.name);
+        if (await lake.workspaceExists(path)) throw new Error(`${path} already exists. Pick another name.`);
+        await lake.importWorkspace(path, typeof source === "string" ? source : "# New script\n");
+      },
     });
-    if (!v) return;
-    const path = joinPath(current.path, v.name);
-    try {
-      if (await lake.workspaceExists(path)) return toast(`${path} already exists. Pick another name.`, "err");
-      await lake.importWorkspace(path, "# New script\n");
-      go("workspace", path);
-    } catch (err) {
-      toast(err.message, "err");
-    }
+    if (v) go("workspace", joinPath(current.path, v.name));
   }
 
   return {

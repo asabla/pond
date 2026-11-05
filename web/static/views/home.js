@@ -1,7 +1,7 @@
 // @ts-check
 // Overview: a context at a glance. Its tables with row counts, what was run lately, what
 // is saved, and how to connect an agent.
-import { h, button, snippet, empty, errorBox, loading, fmtTime, fmtDuration, guard } from "../dom.js";
+import { h, button, snippet, empty, errorBox, loading, fmtTime, fmtDuration, guard, shellQuote } from "../dom.js";
 import { listGraphs } from "../graph.js";
 import { runStatus } from "./jobs.js";
 
@@ -45,13 +45,13 @@ export function createHomeView(ui) {
     const ctx = ui.ctx;
     if (ctx && !ctx.running) {
       return page(head(h("p", { class: "home-status stopped" }, "Stopped")),
-        h("div", { class: "home-note" }, h("p", {}, "This context isn't running. Start it in a terminal to open its lake here:"), snippet(`pond ${ctx.dir}`)));
+        h("div", { class: "home-note" }, h("p", {}, "This context isn't running. Start it in a terminal to open its lake here:"), snippet(`pond ${shellQuote(ctx.dir)}`)));
     }
     if (ui.state.offline) {
       return page(head(h("p", { class: "home-status offline" }, "Not responding")),
         h("div", { class: "home-note" },
           h("p", {}, "MiniLake for this context stopped answering. Its logs usually say why:"),
-          ui.context?.container ? snippet(`docker logs ${ui.context.container}`) : null,
+          ui.context?.container ? snippet(`pond logs ${shellQuote(ui.ctx?.dir)}`) : null,
           h("p", { class: "muted" }, h("span", { class: "loading" }), ` Retrying · ${ui.state.offline.error}`)));
     }
     page(head(h("p", { class: "home-status ok" }, "Running")), loading());
@@ -65,7 +65,7 @@ export function createHomeView(ui) {
       ]);
       if (t !== token) return;
       render({ tables, history, queries, graphs, runs });
-      countRows(tables, t);
+
     } catch (err) {
       if (t === token) page(head(null), errorBox(err.message));
     }
@@ -86,7 +86,7 @@ export function createHomeView(ui) {
     const counted = tables.slice(0, MAX_COUNTED);
     if (!counted.length) return;
     const sql = counted.map((tb, i) => `SELECT ${i} AS i, count(*) AS n FROM ${lake.quoteName(tb.full_name)}`).join("\nUNION ALL\n");
-    const res = await lake.runSql(sql).catch(() => null);
+    const res = await lake.runSql(`/* pond:system */ ${sql}`).catch(() => null);
     if (t !== token || !res) return;
     for (const [i, n] of res.rows) {
       const cell = el.querySelector(`[data-rows="${i}"]`);
@@ -100,7 +100,7 @@ export function createHomeView(ui) {
       ? h("ul", { class: "home-list tables" }, tables.map((tb, i) => h("li", {},
         h("a", { href: `#/data/${tb.full_name}` },
           h("span", { class: "ns" }, `${tb.catalog_name}.${tb.schema_name}.`), h("b", {}, tb.name)),
-        h("span", { class: "meta", "data-rows": String(i) }, i < MAX_COUNTED ? "" : "—"),
+        h("span", { class: "meta", "data-rows": String(i) }, "Not counted"),
         h("span", { class: "meta" }, `${tb.columns?.length ?? 0} columns`))))
       : h("div", { class: "home-empty" },
         h("p", {}, "This lake has no tables yet. Drop a CSV, JSON or Parquet file here, or create one with SQL."),
@@ -117,7 +117,7 @@ export function createHomeView(ui) {
       head(h("p", { class: "home-status ok" }, "Running")),
       h("div", { class: "home-grid" },
         h("div", { class: "home-main" },
-          h("section", { class: "home-section" }, h("h2", {}, "Tables ", h("span", { class: "count" }, String(tables.length))), tableList),
+          h("section", { class: "home-section" }, h("h2", {}, "Tables ", h("span", { class: "count" }, String(tables.length))), tables.length > 0 && button("Count rows", guard(() => countRows(tables, token))), tableList),
           h("section", { class: "home-section" }, h("h2", {}, "Recent queries"), recent)),
         h("aside", { class: "home-side" },
           h("section", { class: "home-section" }, h("h2", {}, "Saved"),

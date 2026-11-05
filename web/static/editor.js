@@ -3,6 +3,8 @@
 // numbers. It needs no library, so it works offline and without a build step.
 import { h } from "./dom.js";
 
+let editorSeq = 0;
+
 const SQL_KEYWORDS = new Set(`select from where group by order having limit offset join left right inner outer full cross on using
 as and or not in is null like ilike between case when then else end distinct union all intersect except with recursive
 insert into values update set delete create replace table view schema catalog drop alter add column if exists
@@ -49,13 +51,15 @@ export function highlight(code, language) {
  * @param {{ language: "sql" | "python", value?: string, placeholder?: string, label: string, className?: string }} opts
  */
 export function createCodeEditor({ language, value = "", placeholder, label, className = "" }) {
+  const helpId = `editor-help-${++editorSeq}`;
   const input = /** @type {HTMLTextAreaElement} */ (h("textarea", {
-    class: "code-input", spellcheck: "false", autocomplete: "off", autocapitalize: "off", "aria-label": label, placeholder, wrap: "off",
+    class: "code-input", spellcheck: "false", autocomplete: "off", autocapitalize: "off", "aria-label": label, "aria-describedby": helpId, placeholder, wrap: "off",
   }));
   const code = h("code", {});
   const layer = h("pre", { class: "code-layer", "aria-hidden": "true" }, code);
   const gutter = h("div", { class: "code-gutter", "aria-hidden": "true" });
-  const el = h("div", { class: `code-editor ${className}` }, gutter, h("div", { class: "code-area" }, layer, input));
+  const el = h("div", { class: `code-editor ${className}` }, gutter, h("div", { class: "code-area" }, layer, input),
+    h("span", { class: "sr-only", id: helpId }, "Tab inserts indentation. Press Escape, then Tab to move to the next control. Shift+Tab moves to the previous control."));
 
   let lines = 0;
   function refresh() {
@@ -76,12 +80,16 @@ export function createCodeEditor({ language, value = "", placeholder, label, cla
 
   input.addEventListener("input", refresh);
   input.addEventListener("scroll", sync);
+  let leaveEditor = false;
   input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { leaveEditor = true; return; }
     if (e.key === "Tab" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (leaveEditor) { leaveEditor = false; return; }
       e.preventDefault();
       input.setRangeText(language === "python" ? "    " : "  ", input.selectionStart, input.selectionEnd, "end");
-      refresh();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
     }
+    leaveEditor = false;
   });
   input.value = value;
   refresh();

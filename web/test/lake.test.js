@@ -11,12 +11,58 @@ beforeEach(() => {
   routes = {};
   globalThis.fetch = async (path, init = {}) => {
     const method = init.method ?? "GET";
-    const body = init.body ? JSON.parse(init.body) : undefined;
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : init.body;
     calls.push({ method, path, body });
     const key = Object.keys(routes).find((k) => `${method} ${path}`.startsWith(k));
     const [status, data] = key ? routes[key](body, path) : [404, { message: `no route ${method} ${path}` }];
     return new Response(typeof data === "string" ? data : JSON.stringify(data), { status });
   };
+});
+
+test("query history separates background statements without deleting them", async () => {
+  routes["GET /api/2.0/sql/history/queries"] = () => [200, { res: [
+    { query_text: "/* pond:system */ SELECT 1" }, { query_text: "SELECT 2" }, { query_text: "SELECT 3" },
+  ] }];
+  assert.deepEqual((await lake.queryHistory(1)).map((row) => row.query_text), ["SELECT 2"]);
+  assert.equal((await lake.queryHistory(3, { includeBackground: true })).length, 3);
+});
+
+test("first import creates its namespace and retries without overwriting a staged file", async () => {
+  const catalogs = [], schemas = [], volumes = [];
+  const client = lake.createLake();
+  routes["GET /pond/config"] = () => [200, { warehouse_id: "w", data_root: "/data" }];
+  routes["GET /api/2.1/unity-catalog/catalogs"] = () => [200, { catalogs }];
+  routes["POST /api/2.1/unity-catalog/catalogs"] = (body) => { catalogs.push(body); return [200, body]; };
+  routes["GET /api/2.1/unity-catalog/schemas"] = () => [200, { schemas }];
+  routes["POST /api/2.1/unity-catalog/schemas"] = (body) => { schemas.push(body); return [200, body]; };
+  routes["GET /api/2.1/unity-catalog/volumes"] = () => [200, { volumes }];
+  routes["POST /api/2.1/unity-catalog/volumes"] = (body) => { volumes.push(body); return [200, body]; };
+  let fail = true;
+  routes["PUT /api/2.0/fs/files/"] = () => fail ? [503, { message: "Upload interrupted" }] : [200, {}];
+  routes["POST /api/2.0/sql/statements"] = () => [200, { status: { state: "SUCCEEDED" }, result: { data_array: [[2]] } }];
+  const opts = { data: new Blob(["id\n1\n2\n"]), fileName: "people.csv", catalog: "main", schema: "raw", table: "people" };
+  await assert.rejects(client.importFile(opts), /Upload interrupted/);
+  fail = false;
+  const result = await client.importFile(opts);
+  assert.equal(result.table, "main.raw.people");
+  assert.equal(result.rows, 2);
+  assert.equal(catalogs.length, 1);
+  assert.equal(schemas.length, 1);
+  assert.equal(volumes.length, 1);
+  const uploads = calls.filter((c) => c.method === "PUT");
+  assert.notEqual(uploads[0].path, uploads[1].path);
+  assert.match(uploads[1].path, /people\.csv\?overwrite=false$/);
+  assert.ok(calls.find((c) => c.body?.statement?.startsWith("CREATE TABLE `main`.`raw`.`people`")));
+  assert.ok(calls.find((c) => c.body?.statement?.includes("read_csv_auto('/data/volumes/main/raw/imports/")));
+});
+
+test("external file queries discover the service root and distinguish volumes from DBFS", async () => {
+  const client = lake.createLake();
+  routes["GET /pond/config"] = () => [200, { warehouse_id: "external" }];
+  routes["POST /api/2.0/sql/statements"] = () => [200, { status: { state: "SUCCEEDED" }, manifest: { schema: { columns: [{ name: "seq" }, { name: "name" }, { name: "file" }] } }, result: { data_array: [[1, "unity_catalog", "/service/lake/unity_catalog.duckdb"]] } }];
+  assert.equal(await client.sqlPath("/Volumes/demo/raw/files/a.csv"), "/service/lake/volumes/demo/raw/files/a.csv");
+  assert.equal(await client.sqlPath("/pond/a.csv"), "/service/lake/dbfs/pond/a.csv");
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1);
 });
 
 test("readHead asks DBFS for only the bytes it needs", async () => {

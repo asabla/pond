@@ -17,11 +17,16 @@ export function h(tag, props = {}, ...children) {
   return el;
 }
 
+let storageWarning = false;
 export function store(key, value) {
   try {
     if (value === undefined) return JSON.parse(localStorage.getItem(key));
     localStorage.setItem(key, JSON.stringify(value));
   } catch {
+    if (value !== undefined && !storageWarning) {
+      storageWarning = true;
+      toast("Browser storage is unavailable or full. Keep this page open and export unsaved work before closing it.", "err");
+    }
     return undefined;
   }
 }
@@ -29,7 +34,8 @@ export function store(key, value) {
 export function toast(text, kind) {
   // The workbench logs these in its activity rail.
   globalThis.document?.dispatchEvent(new CustomEvent("pond:toast", { detail: { text: String(text), kind } }));
-  const stack = $("#toasts");
+  const stack = globalThis.document?.querySelector("#toasts");
+  if (!stack) return;
   stack.append(h("div", { class: `toast ${kind ?? ""}` }, text));
   while (stack.children.length > 3) stack.firstElementChild.remove();
   setTimeout(() => stack.firstElementChild?.remove(), 3500);
@@ -37,7 +43,34 @@ export function toast(text, kind) {
 
 export const loading = (text) => h("div", { class: "empty" }, h("span", { class: "loading" }), text ? ` ${text}` : null);
 export const empty = (...children) => h("div", { class: "empty" }, ...children);
-export const errorBox = (message) => h("div", { class: "error" }, message);
+export const errorBox = (message) => h("div", { class: "error", role: "alert" }, message);
+
+// Reuse unchanged subtrees, including their focused controls and event handlers.
+// When a changed subtree must be replaced, restore the same logical control.
+export function reconcile(root, ...children) {
+  const next = h("div", {}, children);
+  const active = document.activeElement;
+  const focused = root.contains(active) ? active : null;
+  const focusKey = focused?.getAttribute("data-focus-key");
+  const sync = (parent, nodes) => {
+    const old = [...parent.childNodes];
+    nodes.forEach((node, i) => {
+      const prev = old[i];
+      if (prev?.isEqualNode(node)) return;
+      if (prev?.nodeType === 1 && node.nodeType === 1 && !["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA"].includes(node.tagName) && prev.tagName === node.tagName && prev.getAttribute("data-key") === node.getAttribute("data-key")) {
+        for (const attr of [...prev.attributes]) if (!node.hasAttribute(attr.name)) prev.removeAttribute(attr.name);
+        for (const attr of [...node.attributes]) if (prev.getAttribute(attr.name) !== attr.value) prev.setAttribute(attr.name, attr.value);
+        sync(prev, [...node.childNodes]);
+      } else if (prev) prev.replaceWith(node);
+      else parent.append(node);
+    });
+    old.slice(nodes.length).forEach((node) => node.remove());
+  };
+  const scroll = root.scrollTop;
+  sync(root, [...next.childNodes]);
+  root.scrollTop = scroll;
+  if (focusKey && !focused.isConnected) root.querySelector(`[data-focus-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
+}
 
 /**
  * A short, unambiguous time: the clock for today, the day and month otherwise, and the
@@ -69,13 +102,13 @@ export function fmtDuration(ms) {
 
 const NUMERIC = /^(TINYINT|SMALLINT|INT|INTEGER|BIGINT|HUGEINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|LONG|SHORT|BYTE|FLOAT|DOUBLE|REAL|DECIMAL|NUMERIC)/i;
 
-export function grid({ columns, rows }, { max = 1000 } = {}) {
+export function grid({ columns, rows }, { max = 1000, label = "Data table" } = {}) {
   const numeric = columns.map((c) => NUMERIC.test(c.type || ""));
-  return h("div", { class: "grid-wrap" },
-    h("table", { class: "grid" },
+  return h("div", { class: "grid-wrap", tabindex: "0", role: "region", "aria-label": label },
+    h("table", { class: "grid", "aria-label": label },
       h("thead", {}, h("tr", {},
         h("th", { class: "rownum" }, "#"),
-        columns.map((c, j) => h("th", { class: numeric[j] ? "num" : null, title: `${c.name} ${c.type ?? ""}` }, c.name, h("small", {}, (c.type || "").toLowerCase()))),
+        columns.map((c, j) => h("th", { scope: "col", class: numeric[j] ? "num" : null, title: `${c.name} ${c.type ?? ""}` }, c.name, h("small", {}, (c.type || "").toLowerCase()))),
         // Takes the spare width, so columns stay as wide as their content.
         h("th", { class: "fill", "aria-hidden": "true" }))),
       h("tbody", {}, rows.slice(0, max).map((row, i) => h("tr", {},
@@ -112,8 +145,8 @@ export function table(rows, cols, { onRow, empty: emptyText = "Nothing here yet.
       }
     },
   } : {});
-  return h("div", { class: "grid-wrap" }, h("table", { class: "grid list" },
-    h("thead", {}, h("tr", {}, cols.map(([label]) => h("th", {}, label)))),
+  return h("div", { class: "grid-wrap", tabindex: "0", role: "region", "aria-label": "List. Scroll horizontally to see all columns." }, h("table", { class: "grid list" },
+    h("thead", {}, h("tr", {}, cols.map(([label]) => h("th", { scope: "col" }, label || "Actions")))),
     h("tbody", {}, rows.map((r) => h("tr", rowProps(r), cols.map(([, render]) => h("td", {}, render(r))))))));
 }
 
@@ -128,8 +161,11 @@ export function download(name, data, type = "application/octet-stream") {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+export const shellQuote = (value) => "'" + String(value).replaceAll("'", "'\"'\"'") + "'";
+
 export function snippet(text) {
   const btn = h("button", {
+    "aria-label": `Copy command: ${text}`,
     onclick: async () => {
       await navigator.clipboard.writeText(text);
       btn.textContent = "Copied";
@@ -185,17 +221,20 @@ export const guard = (fn) => async (...args) => {
   }
 };
 
-export function action(label, fn, kind = "") {
+export function action(label, fn, kind = "", requiresLake = true) {
   const btn = h("button", {
-    class: `btn ${kind}`,
+    class: `btn ${kind}`, "data-lake-action": requiresLake,
     onclick: async () => {
+      const restoreFocus = document.activeElement === btn;
       btn.disabled = true;
       try {
         await fn();
       } catch (err) {
         toast(err.message, "err");
       } finally {
-        btn.disabled = false;
+        btn.disabled = requiresLake && Boolean(btn.closest('[data-offline="true"]'));
+        if (btn.disabled) btn.dataset.offlineDisabled = "true";
+        if (restoreFocus && !btn.disabled && btn.isConnected && document.activeElement === document.body) btn.focus({ preventScroll: true });
       }
     },
   }, label);
@@ -204,16 +243,20 @@ export function action(label, fn, kind = "") {
 
 /* ---------- Dialogs (native <dialog>) ---------- */
 
+let dialogSeq = 0;
 function openDialog(build) {
   return new Promise((resolve) => {
-    const dlg = h("dialog", { class: "dialog" });
+    const previous = document.activeElement;
+    const dlg = h("dialog", { class: "dialog", "aria-labelledby": `dialog-title-${++dialogSeq}` });
     const close = (value) => {
       dlg.close();
       dlg.remove();
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
       resolve(value);
     };
-    dlg.addEventListener("cancel", (e) => (e.preventDefault(), close(null)));
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); if (!dlg.dataset.busy) close(null); });
     dlg.append(build(close));
+    dlg.querySelector("h2")?.setAttribute("id", dlg.getAttribute("aria-labelledby"));
     document.body.append(dlg);
     dlg.showModal();
     dlg.querySelector("[autofocus], input, textarea, select")?.focus();
@@ -238,12 +281,13 @@ function openDialog(build) {
 /**
  * A modal form. Resolves to the field values, or null when cancelled.
  * @param {{ title: string, intro?: any, fields: Field[], submit?: string, danger?: boolean,
- *   validate?: (values: Record<string, any>) => string | null | undefined | false }} opts
+ *   validate?: (values: Record<string, any>) => string | null | undefined | false,
+ *   onSubmit?: (values: Record<string, any>) => Promise<any> }} opts
  * @returns {Promise<Record<string, any> | null>}
  */
-export function formDialog({ title, intro, fields, submit = "Save", danger = false, validate }) {
+export function formDialog({ title, intro, fields, submit = "Save", danger = false, validate, onSubmit }) {
   return openDialog((close) => {
-    const err = h("div", { class: "form-error", hidden: true });
+    const err = h("div", { class: "form-error", hidden: true, role: "alert", tabindex: "-1" });
     const form = h("form", { method: "dialog" },
       h("h2", {}, title),
       intro && h("p", { class: "help" }, intro),
@@ -252,35 +296,53 @@ export function formDialog({ title, intro, fields, submit = "Save", danger = fal
       h("div", { class: "dialog-actions" },
         h("button", { type: "button", class: "btn ghost", onclick: () => close(null) }, "Cancel"),
         h("button", { type: "submit", class: `btn ${danger ? "danger" : "primary"}` }, submit)));
-    form.addEventListener("submit", (e) => {
+    form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      const dlg = form.closest("dialog");
+      if (dlg.dataset.busy) return;
       const values = {};
       for (const f of fields) {
         const input = form.elements[f.name];
         // Passwords and secrets keep their spaces: they may be part of the value.
-        values[f.name] = f.type === "file" ? input.files[0] : f.type === "checkbox" ? input.checked : f.type === "password" ? input.value : input.value.trim();
+        values[f.name] = f.type === "file" ? input.files[0] : f.type === "checkbox" ? input.checked : (f.type === "password" || f.type === "textarea") ? input.value : input.value.trim();
       }
       const problem = validate?.(values);
       if (problem) {
         err.textContent = problem;
         err.hidden = false;
+        err.focus();
         return;
       }
-      close(values);
+      const controls = [...form.querySelectorAll("input,textarea,select,button")].filter((el) => !el.disabled);
+      try {
+        dlg.dataset.busy = "true";
+        form.setAttribute("aria-busy", "true");
+        controls.forEach((el) => { el.disabled = true; });
+        await onSubmit?.(values);
+        close(values);
+      } catch (error) {
+        err.textContent = error.message || String(error);
+        err.hidden = false;
+        err.focus();
+      } finally {
+        delete dlg.dataset.busy;
+        form.removeAttribute("aria-busy");
+        controls.forEach((el) => { el.disabled = false; });
+      }
     });
     return form;
   });
 }
 
 function field(f) {
-  const common = { name: f.name, id: `f-${f.name}`, required: f.required, placeholder: f.placeholder, autocomplete: "off", spellcheck: "false" };
+  const common = { name: f.name, id: `f-${dialogSeq}-${f.name}`, required: f.required, placeholder: f.placeholder, autocomplete: "off", spellcheck: "false", "aria-describedby": f.hint ? `hint-${dialogSeq}-${f.name}` : null };
   let input;
   if (f.type === "textarea") input = h("textarea", { ...common, rows: f.rows ?? 8, class: "mono" }, f.value ?? "");
   else if (f.type === "select") input = h("select", common, f.options.map((o) => h("option", { value: o.value ?? o, selected: (o.value ?? o) === f.value }, o.label ?? o)));
   else if (f.type === "checkbox") {
     return h("label", { class: "check" }, h("input", { ...common, type: "checkbox", checked: f.value }), " ", f.label);
   } else input = h("input", { ...common, type: f.type ?? "text", value: f.value, accept: f.accept, pattern: f.pattern });
-  return h("label", { class: "field", for: common.id }, h("span", {}, f.label), input, f.hint && h("small", {}, f.hint));
+  return h("label", { class: "field", for: common.id }, h("span", {}, f.label), input, f.hint && h("small", { id: `hint-${dialogSeq}-${f.name}` }, f.hint));
 }
 
 /**

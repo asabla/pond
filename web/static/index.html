@@ -31,7 +31,7 @@
     </button>
     <div class="titlebar-end">
       <button class="icon-btn" id="theme-btn" aria-label="Theme"><span class="ico ico-theme" aria-hidden="true"></span></button>
-      <button class="activity-btn" id="activity-btn" aria-expanded="false" aria-controls="activity">
+      <button class="activity-btn" id="activity-btn" aria-label="Activity" aria-expanded="false" aria-controls="activity">
         <span class="ico ico-activity" aria-hidden="true"></span><span class="activity-btn-text">Activity</span><b id="activity-count" hidden></b>
       </button>
     </div>
@@ -46,7 +46,8 @@
       <div class="nav-contexts" id="nav-contexts"></div>
     </nav>
 
-    <main class="main">
+    <main class="main" id="main">
+      <div class="context-bar"><span id="active-context"></span><span id="connection-status" role="status"></span></div>
       <div class="tabs" id="tabs" role="tablist" aria-label="Open items"></div>
       <div class="panels" id="panels"></div>
     </main>
@@ -57,8 +58,8 @@
         <button class="icon-btn" id="activity-close" aria-label="Hide activity"><span class="ico ico-close" aria-hidden="true"></span></button>
       </header>
       <div class="activity-agents">
-        <p id="webmcp-status"></p>
-        <label class="check"><input type="checkbox" id="trust"> Ask before agents delete or replace data</label>
+        <p id="webmcp-status"></p><p id="agent-context"></p><p>These confirmations apply to browser agents on this page. External MCP clients use their own approval controls. Python can change data. Activity lasts until this page reloads.</p>
+        <label class="check"><input type="checkbox" id="trust"> Browser agent confirmations: ask before deleting or replacing data</label>
       </div>
       <ol class="activity-log" id="activity-log"></ol>
     </aside>
@@ -67,7 +68,7 @@
   <dialog class="palette" id="palette" aria-label="Search and commands">
     <div class="palette-box">
       <input id="palette-input" class="palette-input" type="text" placeholder="Search, or type a command" autocomplete="off" spellcheck="false"
-        role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list">
+        aria-label="Search tables, queries, graphs and commands" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list">
       <ul class="palette-list" id="palette-list" role="listbox" aria-label="Results"></ul>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open <kbd>⌘↵</kbd> new tab <kbd>esc</kbd> close</p>
     </div>

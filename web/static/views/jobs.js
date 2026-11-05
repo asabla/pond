@@ -1,7 +1,8 @@
 // @ts-check
 // Jobs: Python/PySpark scripts run in Spark containers on this context's network.
+import { createDraft } from "../drafts.js";
 import { createCodeEditor } from "../editor.js";
-import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtDuration } from "../dom.js";
+import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtDuration, download } from "../dom.js";
 
 const POLL_MS = 2000;
 const TEMPLATE = `from pyspark.sql import SparkSession
@@ -127,12 +128,34 @@ export function createJobsView(ui) {
     const source = task?.python_file ? await lake.exportWorkspace(task.python_file).catch(() => null) : null;
     if (!live()) return;
     const name = job.settings?.name ?? `Job ${id}`;
-    const code = createCodeEditor({ language: "python", value: source ?? "", label: "Script", className: "script-editor" });
+    const initial = { source: source ?? "", parameters: joinParams(task?.parameters) };
+    const draft = createDraft(`pond.objectDraft.${ui.ctx?.id ?? "self"}.job.${id}`, initial, { file: task?.python_file });
+    if (!draft.dirty) draft.saved(initial, { file: task?.python_file });
+    const code = createCodeEditor({ language: "python", value: draft.value.source, label: "Script", className: "script-editor" });
     const editor = code.input;
-    const params = h("input", { class: "input mono", value: joinParams(task?.parameters), placeholder: "Arguments passed to the script", "aria-label": "Parameters" });
+    const params = h("input", { class: "input mono", value: draft.value.parameters, placeholder: "Arguments passed to the script", "aria-label": "Parameters" });
     // Saving writes the editor over the script, so only offer it when the script loaded.
     const editable = Boolean(task?.python_file) && source != null;
-    const saveJob = () => lake.updateJob(id, { name, file: task.python_file, source: editor.value, parameters: splitParams(params.value) });
+    const draftStatus = h("p", { class: "help", role: "status" });
+    const track = () => {
+      draft.change({ source: editor.value, parameters: params.value });
+      const message = draft.dirty ? "Unsaved changes. Draft kept in this browser." : "Saved in the lake."; if (draftStatus.textContent !== message) draftStatus.textContent = message;
+    };
+    editor.addEventListener("input", track);
+    params.addEventListener("input", track);
+    track();
+    const saveJob = async () => {
+      const latest = await lake.getJob(id);
+      const latestTask = lake.jobScript(latest);
+      const remote = { source: await lake.exportWorkspace(task.python_file), parameters: joinParams(latestTask?.parameters) };
+      if (latestTask?.python_file !== draft.identity.file || draft.conflicts(remote)) {
+        throw new Error("The saved job changed. Your draft is kept. Use Save as new job to keep both versions.");
+      }
+      const value = { source: editor.value, parameters: params.value };
+      await lake.updateJob(id, { name, file: task.python_file, source: value.source, parameters: splitParams(value.parameters) });
+      draft.saved(value);
+      track();
+    };
     const runsBox = h("div", {}, section("Runs", runs.length, runsTable(runs)));
 
     page(
@@ -141,9 +164,13 @@ export function createJobsView(ui) {
         action("Delete", async () => {
           if (!(await confirmDialog({ title: `Delete job “${name}”?`, body: "The job and its run history are removed. The script stays in the workspace." }))) return;
           await lake.deleteJob(id);
+          draft.clear();
+          await ui.refreshTree();
           toast(`Deleted job ${name}`);
           ui.navigate("jobs");
         }, "danger-ghost"),
+        editable && button("Export script", () => download(`${name}.py`, editor.value, "text/x-python")),
+        editable && button("Save as new job…", () => scriptDialog("job", { source: editor.value, parameters: params.value })),
         editable && action("Save", async () => {
           await saveJob();
           toast("Saved");
@@ -155,7 +182,7 @@ export function createJobsView(ui) {
         }, "primary"),
       ]),
       h("p", { class: "context-dir mono" }, task?.python_file ?? "No Python task"),
-      section("Script", null, source == null ? errorBox("Could not load the script from the workspace.") : code.el),
+      section("Script", null, source == null ? errorBox("Could not load the script from the workspace.") : [code.el, draftStatus]),
       section("Parameters", null, params),
       runsBox,
     );
@@ -200,6 +227,7 @@ export function createJobsView(ui) {
         h("dt", {}, "Started"), h("dd", {}, fmtTime(run.start_time)),
         h("dt", {}, "Duration"), h("dd", {}, runDuration(run)),
         run.state?.state_message && [h("dt", {}, "Message"), h("dd", {}, run.state.state_message)]),
+      !done && h("p", { class: "help", role: "note" }, "Cancel changes the reported run state. MiniLake can continue to execute the script and change data until it finishes."),
       section("Output", null,
         !done
           ? empty(h("span", { class: "loading" }), " Running. MiniLake shows the output when the run finishes.")
@@ -221,7 +249,8 @@ export function createJobsView(ui) {
     });
   }
 
-  async function scriptDialog(mode) {
+  async function scriptDialog(mode, draft = null) {
+    let created = /** @type {any} */ (null);
     const v = await formDialog({
       title: mode === "job" ? "New job" : "Run a script",
       intro: mode === "job"
@@ -229,24 +258,20 @@ export function createJobsView(ui) {
         : "Runs once without creating a job. The script is saved under /Shared/pond/runs.",
       fields: [
         { name: "name", label: "Name", required: true, value: mode === "job" ? "" : "adhoc", pattern: "[\\w .\\-]+" },
-        { name: "source", label: "Python", type: "textarea", value: TEMPLATE, rows: 14, required: true },
-        { name: "params", label: "Parameters", placeholder: "Optional arguments, space separated" },
+        { name: "source", label: "Python", type: "textarea", value: draft?.source ?? TEMPLATE, rows: 14, required: true },
+        { name: "params", label: "Parameters", value: draft?.parameters, placeholder: "Optional arguments, space separated" },
       ],
       submit: mode === "job" ? "Create job" : "Run",
+      onSubmit: async (values) => {
+        created = mode === "job"
+          ? await lake.createScriptJob(values.name, values.source, splitParams(values.params))
+          : await lake.runScript(values.name, values.source, splitParams(values.params));
+      },
     });
-    if (!v) return;
-    try {
-      if (mode === "job") {
-        const { job_id } = await lake.createScriptJob(v.name, v.source, splitParams(v.params));
-        toast(`Created job ${v.name}`);
-        ui.navigate("jobs", "job", job_id);
-      } else {
-        const { run_id } = await lake.runScript(v.name, v.source, splitParams(v.params));
-        ui.navigate("jobs", "run", run_id);
-      }
-    } catch (err) {
-      toast(err.message, "err");
-    }
+    if (!v || !created) return;
+    await ui.refreshTree();
+    toast(mode === "job" ? `Created job ${v.name}` : `Started ${v.name}`);
+    ui.navigate("jobs", mode === "job" ? "job" : "run", mode === "job" ? created.job_id : created.run_id);
   }
 
   return {

@@ -6,7 +6,16 @@ import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empt
 import * as G from "../graph.js";
 
 // replaceChildren, skipping the null and false a conditional child leaves behind.
-const put = (el, ...children) => el.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
+const put = (el, ...children) => {
+  const active = el.contains(document.activeElement) ? document.activeElement : null;
+  const key = active?.getAttribute("data-focus-key") || active?.getAttribute("aria-label") || active?.textContent;
+  el.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
+  if (active && !active.isConnected) {
+    const next = [...el.querySelectorAll("button,input,select")].find((node) => (node.getAttribute("data-focus-key") || node.getAttribute("aria-label") || node.textContent) === key);
+    if (next) next.focus({ preventScroll: true });
+    else { el.tabIndex = -1; el.focus({ preventScroll: true }); }
+  }
+};
 
 const LAYOUT_MS = (nodes) => Math.min(15000, 2500 + nodes * 2);
 const TABLE_ROWS = 1000;
@@ -57,7 +66,7 @@ const STALE = Symbol("stale graph load");
 export function createGraphView(ui) {
   const { lake } = ui;
   const runSql = async (sql) => {
-    const result = await lake.runSql(sql);
+    const result = await lake.runSql(`/* pond:system */ ${sql}`);
     if (result.truncated) throw new Error("SQL returned an incomplete graph. Narrow the graph SQL.");
     return result;
   };
@@ -86,17 +95,19 @@ export function createGraphView(ui) {
     saved: [],
   };
 
-  const stage = h("div", { class: "graph-stage", "aria-label": "Graph canvas" });
+  const stage = h("div", { class: "graph-stage", role: "img", "aria-label": "Network view. Use Find node for details, or Show table for metrics." });
   const tableWrap = h("div", { class: "graph-table", hidden: true });
   const legend = h("div", { class: "graph-legend", "aria-label": "Legend" });
   const status = h("div", { class: "graph-status" });
+  const announcement = h("p", { class: "sr-only", role: "status" });
+  const motion = matchMedia("(prefers-reduced-motion: reduce)");
   const toolbar = h("div", { class: "graph-toolbar" });
   const panelTabs = h("div", { class: "panel-tabs", role: "tablist" });
   const uid = ui.uid ?? "main";
   const panelBody = h("div", { class: "panel-body graph-panel-body", id: `graph-panel-${uid}`, role: "tabpanel" });
-  const main = h("div", { class: "graph-main" }, toolbar, status, h("div", { class: "graph-canvas-wrap" }, stage, tableWrap, legend));
+  const main = h("div", { class: "graph-main" }, toolbar, h("p", { class: "graph-help" }, "Use Find node and Enter to inspect a node. Enter its ID when names repeat. Show table lists metrics; the Node panel has neighbour and expansion controls."), status, h("div", { class: "graph-canvas-wrap" }, stage, tableWrap, legend));
   const panel = h("aside", { class: "query-panel graph-panel" }, panelTabs, panelBody);
-  const el = h("section", { class: "view graph-view", "aria-label": "Graph" }, main, panel);
+  const el = h("section", { class: "view graph-view", "aria-label": "Graph" }, main, panel, announcement);
 
   /* ---------- Loading a graph ---------- */
 
@@ -456,8 +467,8 @@ export function createGraphView(ui) {
     s.sigma?.refresh({ skipIndexation: true });
   }
 
-  function startLayout(ms) {
-    if (!s.graph?.order) return;
+  function startLayout(ms, { requested = false } = {}) {
+    if (!s.graph?.order || (motion.matches && !requested)) return;
     loadLibs().then(({ lib }) => {
       if (!s.layout) {
         const settings = lib.layoutForceAtlas2.inferSettings(s.graph);
@@ -481,7 +492,7 @@ export function createGraphView(ui) {
   function focusNode(key) {
     if (!s.sigma || !s.graph.hasNode(key)) return;
     const d = s.sigma.getNodeDisplayData(key);
-    if (d) s.sigma.getCamera().animate({ x: d.x, y: d.y, ratio: 0.35 }, { duration: 500 });
+    if (d) s.sigma.getCamera().animate({ x: d.x, y: d.y, ratio: 0.35 }, { duration: motion.matches ? 0 : 500 });
   }
 
   // Moves the camera so all the given nodes are in view (ratio 1 shows the whole graph).
@@ -492,11 +503,12 @@ export function createGraphView(ui) {
     const ys = pts.map((d) => d.y);
     const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
     const ratio = Math.min(1, Math.max(0.2, Math.max(x1 - x0, y1 - y0) * 1.4));
-    s.sigma.getCamera().animate({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, ratio }, { duration: 500 });
+    s.sigma.getCamera().animate({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, ratio }, { duration: motion.matches ? 0 : 500 });
   }
 
   function select(key, { center = false } = {}) {
     s.selected = key && s.graph?.hasNode(key) ? key : null;
+    announcement.textContent = s.selected ? `Selected ${s.graph.getNodeAttribute(s.selected, "label")}. Details and neighbours are in the Node panel.` : "No node selected.";
     if (s.selected) {
       s.panel = "node";
       if (center) focusNode(s.selected);
@@ -542,6 +554,7 @@ export function createGraphView(ui) {
         s.saved.map((g) => h("option", { value: g.name, selected: g.name === s.def?.name }, g.name))),
       h("button", { class: "btn", onclick: guard(() => newGraph()) }, "New graph"),
       s.def && h("button", { class: "btn", onclick: guard(() => saveDialog()) }, s.def.name ? "Edit" : "Save…"),
+      s.def && h("button", { class: "btn ghost", onclick: () => download(`${s.def.name ?? "graph"}.pond.json`, JSON.stringify({ graphs: [{ ...s.def, name: s.def.name ?? "Graph" }] }, null, 2), "application/json") }, "Export definition"),
       s.graph && [
         h("span", { class: "graph-sep" }),
         select_("Size", s.size, sizeOptions, async (v) => {
@@ -574,8 +587,8 @@ export function createGraphView(ui) {
         s.sigma?.setSetting("renderLabels", s.labels);
         renderStatus();
       } }, "Labels"),
-      h("button", { class: "btn ghost small", disabled: s.showTable, onclick: () => (running ? stopLayout() : startLayout(LAYOUT_MS(s.graph.order))) }, running ? "Stop layout" : "Run layout"),
-      h("button", { class: "btn ghost small", "aria-pressed": String(s.showTable), onclick: () => {
+      h("button", { class: "btn ghost small", "data-focus-key": "layout", disabled: s.showTable, onclick: () => (running ? stopLayout() : startLayout(LAYOUT_MS(s.graph.order), { requested: true })) }, running ? "Stop layout" : "Run layout"),
+      h("button", { class: "btn ghost small", "data-focus-key": "graph-table", "aria-pressed": String(s.showTable), onclick: () => {
         s.showTable = !s.showTable;
         renderView();
       } }, s.showTable ? "Show graph" : "Show table"));
@@ -683,7 +696,7 @@ export function createGraphView(ui) {
 
   function renderNodePanel() {
     const key = s.selected;
-    if (!key) return put(panelBody, empty("Click a node to see its details and neighbours."));
+    if (!key) return put(panelBody, empty("Enter a node ID or name in Find node and press Enter, or select a node on the graph. Use Show table for node metrics."));
     const g = s.graph;
     const a = g.getNodeAttributes(key);
     const metricRows = Object.entries(s.metrics).filter(([m]) => m !== "degree").map(([m, vals]) => [METRICS[m]?.label ?? m, vals[key]]);
@@ -834,6 +847,8 @@ export function createGraphView(ui) {
   async function newGraph(prefill = {}) {
     const tables = await allTables();
     if (!tables.length) return sqlDialog();
+    const cols = async (t) => (await lake.getTable(t)).columns?.map((c) => c.name) ?? [];
+    let edgeCols = [], nodeCols = [];
     const first = await formDialog({
       title: "New graph from tables",
       intro: "Pick the table that holds the edges (one row per connection) and, optionally, a table describing the nodes.",
@@ -843,11 +858,12 @@ export function createGraphView(ui) {
         { name: "directed", label: "Edges have a direction (A → B is not B → A)", type: "checkbox", value: true },
       ],
       submit: "Next",
+      onSubmit: async (values) => {
+        [edgeCols, nodeCols] = await Promise.all([cols(values.edgeTable), values.nodeTable ? cols(values.nodeTable) : []]);
+        if (edgeCols.length < 2) throw new Error("The edge table needs at least two columns. Choose another table.");
+      },
     });
     if (!first) return;
-    const cols = async (t) => (await lake.getTable(t)).columns?.map((c) => c.name) ?? [];
-    const edgeCols = await cols(first.edgeTable);
-    const nodeCols = first.nodeTable ? await cols(first.nodeTable) : [];
     const guess = (names, ...hints) => names.find((n) => hints.some((x) => n.toLowerCase() === x)) ?? names.find((n) => hints.some((x) => n.toLowerCase().includes(x)));
     const none = { value: "", label: "None" };
     const second = await formDialog({
@@ -863,13 +879,12 @@ export function createGraphView(ui) {
       ],
       validate: (v) => (v.source === v.target ? "Source and target must be different columns." : null),
       submit: "Open graph",
+      onSubmit: async (values) => openAdhoc(G.definitionFromTables(/** @type {any} */ ({ ...first, ...values, name: null }))),
     });
     if (!second) return;
-    const def = G.definitionFromTables(/** @type {any} */ ({ ...first, ...second, name: null }));
-    await openAdhoc(def);
   }
 
-  async function sqlDialog(def = {}) {
+  async function sqlDialog(def = {}, onSubmit = undefined) {
     const v = await formDialog({
       title: def.name ? `Edit “${def.name}”` : "New graph from SQL",
       intro: "The edge query's first two columns are the source and target. A column named weight weights edges; other columns become edge attributes. The node query's first column is the node id; a column named label names nodes.",
@@ -881,34 +896,45 @@ export function createGraphView(ui) {
       ],
       validate: (x) => G.validateDefinition({ ...x, name: x.name || null }),
       submit: def.name !== undefined ? "Save" : "Open graph",
+      onSubmit: onSubmit ?? (async (values) => openAdhoc(values)),
     });
     if (!v) return null;
     return { ...def, ...v };
   }
 
   async function saveDialog() {
-    const v = await sqlDialog({ ...s.def, name: s.def.name ?? "" });
-    if (!v) return;
-    const saved = await G.saveGraph(lake, v);
+    let saved = /** @type {any} */ (null);
+    const original = G.normalize(s.def);
+    const v = await sqlDialog({ ...s.def, name: s.def.name ?? "" }, async (values) => {
+      const current = (await G.listGraphs(lake)).find((g) => g.name === values.name);
+      if (current && current.name !== original.name) throw new Error("That graph name already exists. Choose a new name to keep both graphs.");
+      if (original.name && values.name === original.name && (!current || JSON.stringify(G.normalize(current)) !== JSON.stringify(original))) throw new Error("The saved graph changed or was removed. Your form is kept. Choose a new name to keep this version.");
+      saved = await G.saveGraph(lake, values);
+    });
+    if (!v || !saved) return;
     s.saved = await G.listGraphs(lake);
+    await ui.refreshTree();
     toast(`Saved graph “${saved.name}”`);
     ui.navigate("graph", saved.name);
-    if (s.def?.name === saved.name) await open(saved);
+    await open(saved);
   }
 
   async function saveMetricsDialog() {
+    let loaded = /** @type {any} */ (null);
     const v = await formDialog({
       title: "Save node metrics as a table",
       intro: "Writes one row per loaded node, with the metrics and groups computed so far, so you can join them in SQL.",
       fields: [{ name: "table", label: "Table", required: true, placeholder: "catalog.schema.table", value: s.def.name ? `${guessSchema()}.${s.def.name.replace(/\W+/g, "_")}_nodes` : "", pattern: "[^.]+\\.[^.]+\\.[^.]+" }],
       submit: "Save",
+      onSubmit: async (values) => {
+        const [catalog, schema, table] = values.table.split(".");
+        const exists = await lake.getTable(values.table).then(() => true, () => false);
+        if (exists && !(await confirmDialog({ title: `Replace ${values.table}?`, body: "The table already exists. Its rows are replaced by the node metrics.", confirm: "Replace" }))) throw new Error("Replacement cancelled. Choose another table name.");
+        loaded = await lake.importFile({ data: new Blob([toCsv(tableData())], { type: "text/csv" }), fileName: `${table}.csv`, catalog, schema, table, mode: "replace" });
+      },
     });
     if (!v) return;
-    const [catalog, schema, table] = v.table.split(".");
-    const exists = await lake.getTable(v.table).then(() => true, () => false);
-    if (exists && !(await confirmDialog({ title: `Replace ${v.table}?`, body: "The table already exists. Its rows are replaced by the node metrics.", confirm: "Replace" }))) return;
-    const res = await lake.importFile({ data: new Blob([toCsv(tableData())], { type: "text/csv" }), fileName: `${table}.csv`, catalog, schema, table, mode: "replace" });
-    toast(`Saved ${res.rows} rows to ${res.table}`);
+    toast(`Saved ${loaded.rows} rows to ${loaded.table}`);
     ui.refreshTree();
   }
 
@@ -962,6 +988,8 @@ export function createGraphView(ui) {
     restyle();
     s.sigma?.setSetting("labelColor", { color: s.theme.ink });
   };
+  const onMotion = () => { if (motion.matches) stopLayout(); };
+  motion.addEventListener("change", onMotion);
   const media = matchMedia("(prefers-color-scheme: dark)");
   media.addEventListener("change", onTheme);
   document.addEventListener("pond:theme", onTheme);
@@ -987,6 +1015,7 @@ export function createGraphView(ui) {
       s.sigma?.refresh();
     },
     dispose() {
+      motion.removeEventListener("change", onMotion);
       ++loadSeq;
       teardown();
       media.removeEventListener("change", onTheme);

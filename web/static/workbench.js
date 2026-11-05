@@ -7,7 +7,7 @@
 // in one context and a table in another can sit side by side.
 import { createLake, LakeError } from "./lake.js";
 import { listGraphs } from "./graph.js";
-import { $, h, toast, store, snippet } from "./dom.js";
+import { $, h, toast, store, snippet, reconcile, shellQuote } from "./dom.js";
 import { registerWebMcp, agentTrust } from "./webmcp.js";
 import { createHomeView } from "./views/home.js";
 import { createDataView } from "./views/data.js";
@@ -38,6 +38,7 @@ const STATE_KEY = "pond.workbench";
  * @property {string} [status]
  * @property {number} slot
  * @property {ReturnType<typeof createLake>} lake
+ * @property {Date} [lastContact]
  * @property {any} config
  * @property {{ url: string | null, error: string } | null} offline
  * @property {Nav} nav
@@ -72,6 +73,8 @@ const state = {
   /** @type {Tab[]} */ tabs: [],
   /** @type {Tab | null} */ active: null,
   filter: "",
+  serverOffline: false,
+  lastContact: null,
   activity: /** @type {{ at: Date, ctx: Ctx | null, actor: "you" | "agent", text: string, detail?: string, error?: boolean }[]} */ ([]),
   unseen: 0,
 };
@@ -93,10 +96,14 @@ function slotOf(id) {
 async function loadContexts() {
   let listed = [];
   try {
-    const res = await fetch("/pond/contexts");
-    if (res.ok) listed = (await res.json()).contexts ?? [];
+    const res = await fetch("/pond/contexts", { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`Pond returned ${res.status}`);
+    listed = (await res.json()).contexts ?? [];
+    state.serverOffline = false;
+    state.lastContact = new Date();
   } catch {
-    // pond itself is unreachable; keep what we know
+    state.serverOffline = true;
+    renderConnection();
     return;
   }
   // A pond that doesn't manage a context (--minilake) still serves its own lake.
@@ -116,6 +123,7 @@ async function loadContexts() {
     };
   });
   state.contexts = next;
+  renderConnection();
   renderNav();
   renderTabs();
 }
@@ -125,8 +133,13 @@ async function loadStatus(ctx) {
   if (!ctx.running) return;
   const was = ctx.offline;
   try {
-    const cfg = await ctx.lake.config({ refresh: true });
+    const health = await ctx.lake.health();
+    if (health.error) throw new Error(health.error);
+    const firstContact = !ctx.config;
+    const cfg = !ctx.config || was ? await ctx.lake.config({ refresh: true }) : ctx.config;
     ctx.config = cfg;
+    ctx.lastContact = new Date();
+    if (firstContact) renderNav();
     ctx.offline = cfg.error ? { url: cfg.minilake_url, error: cfg.error } : null;
   } catch (err) {
     ctx.offline = { url: null, error: String(err.message || err) };
@@ -136,16 +149,49 @@ async function loadStatus(ctx) {
     // Coming back: reload what the context's tabs show.
     if (!ctx.offline) {
       await refreshNav(ctx);
-      for (const t of state.tabs) if (t.ctx === ctx && t.instance) t.instance.show(t.parts);
-    } else if (state.active?.ctx === ctx && state.active.instance) state.active.instance.show(state.active.parts);
+      for (const t of state.tabs) if (t.ctx === ctx && t.instance && t.view !== "query" && !t.instance.el.querySelector("textarea")) t.instance.show(t.parts);
+    } else if (state.active?.ctx === ctx && state.active.instance && !["query", "jobs", "files"].includes(state.active.view)) state.active.instance.show(state.active.parts);
+  }
+  for (const tab of state.tabs) if (tab.ctx === ctx && tab.instance) updateAvailability(tab);
+  renderConnection();
+}
+
+// Keep checking after a healthy start as well as during an outage.
+const watching = new Set();
+async function watch(ctx) {
+  if (watching.has(ctx.id)) return;
+  watching.add(ctx.id);
+  const tick = async () => {
+    if (!ctx.running || byId(ctx.id) !== ctx) { watching.delete(ctx.id); return; }
+    try { await loadStatus(ctx); } finally { setTimeout(tick, RETRY_MS); }
+  };
+  await tick();
+}
+
+function updateAvailability(tab) {
+  const offline = Boolean(state.serverOffline || !tab.ctx.running || tab.ctx.offline);
+  tab.instance.el.dataset.offline = String(offline);
+  for (const button of tab.instance.el.querySelectorAll("[data-lake-action]")) {
+    if (offline && !button.disabled) { button.dataset.offlineDisabled = "true"; button.disabled = true; }
+    else if (!offline && button.dataset.offlineDisabled) { delete button.dataset.offlineDisabled; button.disabled = false; }
   }
 }
 
-// While a context's lake is down, keep retrying so its tabs come alive on their own.
-/** @param {Ctx} ctx */
-async function watch(ctx) {
-  await loadStatus(ctx);
-  if (ctx.offline && ctx.running) setTimeout(() => watch(ctx), RETRY_MS);
+function renderConnection() {
+  const ctx = state.active?.ctx ?? self();
+  if (!ctx) return;
+  const contextText = `${ctx.name} · ${ctx.dir}`;
+  if ($("#active-context").textContent !== contextText) $("#active-context").textContent = contextText;
+  const agentText = `Browser agent target: ${self()?.name} · ${self()?.dir}`;
+  if ($("#agent-context").textContent !== agentText) $("#agent-context").textContent = agentText;
+  const message = state.serverOffline ? "Pond connection lost. Retrying; editor drafts are kept."
+    : !ctx.running ? "Stopped. Start this context in a terminal."
+    : ctx.offline ? `MiniLake connection lost: ${ctx.offline.error.replace(/[. ]+$/, "")}. Retrying; editor drafts are kept.` : "Connected";
+  for (const tab of state.tabs) if (tab.instance) updateAvailability(tab);
+  const last = ctx.lastContact ?? state.lastContact;
+  const status = $("#connection-status");
+  const statusText = `${message}${(state.serverOffline || ctx.offline) && last ? ` Last contact: ${last.toLocaleTimeString()}.` : ""}`;
+  if (status.textContent !== statusText) status.textContent = statusText;
 }
 
 /* ---------- Navigator data ---------- */
@@ -285,7 +331,7 @@ function titleOf(tab) {
     case "query": return tab.title ?? (tab.agent ? "Agent queries" : "Query");
     case "graph": return a ?? tab.title ?? "Graph";
     case "jobs": return a === "job" ? `Job ${b}` : a === "run" ? `Run #${b}` : "Jobs";
-    case "files": return tab.parts.length > 1 ? tab.parts.at(-1) : a === "workspace" ? "Workspace" : "Files";
+    case "files": return tab.parts.length > 1 ? tab.parts.at(-1) : a === "workspace" ? "Scripts" : "Files";
     case "admin": return "Settings";
     default: return tab.view;
   }
@@ -331,6 +377,7 @@ function ensureInstance(tab) {
   tab.instance.el.hidden = false;
   $("#panels").append(tab.el);
   tab.instance.show(tab.parts);
+  updateAvailability(tab);
   return tab.instance;
 }
 
@@ -350,6 +397,7 @@ function activateTab(tab, { history = true } = {}) {
   renderNav();
   persist();
   closeDrawer();
+  renderConnection();
 }
 
 /** @param {Tab} tab @param {string[]} parts @param {{ history?: boolean }} [opts] */
@@ -368,7 +416,13 @@ function closeTab(tab) {
   if (i < 0) return;
   tab.instance?.dispose?.();
   tab.el?.remove();
-  store(`pond.draft.${tab.id}`, null);
+  if (!tab.agent) {
+    const closed = store("pond.closedTabs") ?? [];
+    closed.unshift({ id: tab.id, ctx: tab.ctx.id, view: tab.view, parts: tab.parts, title: tab.title });
+    for (const old of closed.splice(20)) store(`pond.draft.${old.id}`, null);
+    store("pond.closedTabs", closed);
+    toast(`Closed ${titleOf(tab)}. Use Reopen closed tab to restore it.`);
+  }
   state.tabs.splice(i, 1);
   if (state.active === tab) {
     const next = state.tabs[i] ?? state.tabs[i - 1];
@@ -378,6 +432,18 @@ function closeTab(tab) {
   }
   renderTabs();
   persist();
+}
+
+function reopenClosedTab() {
+  const closed = store("pond.closedTabs") ?? [];
+  const saved = closed.shift();
+  if (!saved) return;
+  const ctx = byId(saved.ctx);
+  if (!ctx) return toast("Start the original context to reopen this item.", "err");
+  store("pond.closedTabs", closed);
+  const tab = { ...saved, ctx };
+  state.tabs.push(tab);
+  activateTab(tab);
 }
 
 function persist() {
@@ -423,6 +489,7 @@ const hashFor = (ctx, view, parts) => `#/${[ctx.id, view, ...parts].map((p) => e
 /** @param {Tab} tab @param {boolean} push */
 function writeHash(tab, push) {
   const hash = hashFor(tab.ctx, tab.view, tab.parts);
+  document.title = `${titleOf(tab)} · ${tab.ctx.name} · Pond`;
   if (location.hash === hash) return;
   if (push) history.pushState(null, "", hash);
   else history.replaceState(null, "", hash);
@@ -453,6 +520,8 @@ function tabUi(tab) {
     mcpUrl: ctx.self ? `${location.origin}/mcp` : ctx.ui ? `${ctx.ui}/mcp` : null,
     state: {
       get offline() {
+        if (state.serverOffline) return { url: null, error: "Pond connection lost. Retrying; editor drafts are kept." };
+        if (!ctx.running) return { url: ctx.ui, error: "Context stopped. Start it in a terminal." };
         return ctx.offline;
       },
       route: { get view() { return tab.view; }, get parts() { return tab.parts; } },
@@ -640,9 +709,9 @@ const isCurrent = (ctx, view, parts) => {
  *   ontoggle?: () => void, title?: string, depth?: number }} props
  */
 function row({ label, icon: ic, meta, open: isOpen, current, onclick, ontoggle, title, depth = 0 }) {
-  return h("div", { class: "row", style: `--depth: ${depth}`, "aria-current": String(Boolean(current)), title },
+  return h("div", { "data-key": String(title ?? label), class: "row", style: `--depth: ${depth}`, "aria-current": String(Boolean(current)), title },
     ontoggle
-      ? h("button", { class: "caret", "aria-expanded": String(Boolean(isOpen)), "aria-label": isOpen ? "Collapse" : "Expand", onclick: ontoggle })
+      ? h("button", { class: "caret", "aria-expanded": String(Boolean(isOpen)), "aria-label": `${isOpen ? "Collapse" : "Expand"} ${typeof label === "string" ? label : title ?? "items"}`, onclick: ontoggle })
       : h("span", { class: "caret-space" }),
     h("button", { class: "row-label", onclick }, ic && icon(ic), h("span", { class: "label" }, typeof label === "string" ? highlight(label) : label),
       meta != null && meta !== "" && h("span", { class: "meta" }, meta)));
@@ -724,7 +793,7 @@ function listGroup(ctx, { key, label, icon: ic, item, all, allCurrent, empty }) 
     row({
       label, icon: ic, open: isOpen, meta: list ? list.length : "", current: allCurrent, ontoggle: () => toggleNav(ctx, key),
       onclick: (e) => {
-        if (!nav.open.has(key) || !all) toggleNav(ctx, key);
+        if (!ctx.nav.open.has(key) || !all) toggleNav(ctx, key);
         all?.(e);
       },
     }),
@@ -743,10 +812,10 @@ function contextSection(ctx) {
   const statusText = { ok: "Running", offline: "Not responding", stopped: "Stopped" }[status];
   const head = h("div", { class: "ctx-head", style: `--ctx: var(--series-${ctx.slot + 1})` },
     h("button", { class: "ctx-toggle", "aria-expanded": String(isOpen), onclick: () => {
-      if (nav.open.has("ctx")) nav.open.delete("ctx");
+      if (ctx.nav.open.has("ctx")) ctx.nav.open.delete("ctx");
       else {
-        nav.open.add("ctx");
-        if (ctx.running && !nav.catalogs) refreshNav(ctx);
+        ctx.nav.open.add("ctx");
+        if (ctx.running && !ctx.nav.catalogs) refreshNav(ctx);
       }
       renderNav();
       persist();
@@ -755,13 +824,13 @@ function contextSection(ctx) {
       h("span", { class: "ctx-name" }, ctx.name),
       h("span", { class: `ctx-status ${status}`, title: ctx.offline?.error ?? ctx.status ?? statusText }, h("i"), statusText)),
     h("span", { class: "ctx-dir", title: ctx.dir }, shortDir(ctx.dir)));
-  if (!isOpen) return h("section", { class: `ctx ${status}`, "aria-label": ctx.name }, head);
+  if (!isOpen) return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head);
   if (!ctx.running) {
-    return h("section", { class: `ctx ${status}`, "aria-label": ctx.name }, head,
-      h("div", { class: "ctx-stopped" }, h("p", {}, "Start it to open its lake here:"), snippet(`pond ${ctx.dir}`)));
+    return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head,
+      h("div", { class: "ctx-stopped" }, h("p", {}, "Start it to open its lake here:"), snippet(`pond ${shellQuote(ctx.dir)}`)));
   }
   const graphsItem = (g) => ({ label: g.name, icon: "graph", onclick: navOpen(ctx, "graph", [g.name]), current: isCurrent(ctx, "graph", [g.name]) });
-  return h("section", { class: `ctx ${status}`, "aria-label": ctx.name }, head,
+  return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head,
     h("ul", { class: "ctx-tree" },
       !state.filter && h("li", {}, row({ label: "Overview", icon: "home", onclick: navOpen(ctx, "home", []), current: isCurrent(ctx, "home", []) })),
       tablesGroup(ctx),
@@ -776,14 +845,14 @@ function contextSection(ctx) {
       }),
       !state.filter && [
         h("li", {}, row({ label: "Files", icon: "files", onclick: navOpen(ctx, "files", ["dbfs"]), current: isCurrent(ctx, "files", ["dbfs"]) })),
-        h("li", {}, row({ label: "Workspace", icon: "workspace", onclick: navOpen(ctx, "files", ["workspace"]), current: isCurrent(ctx, "files", ["workspace"]) })),
+        h("li", {}, row({ label: "Scripts", icon: "workspace", onclick: navOpen(ctx, "files", ["workspace"]), current: isCurrent(ctx, "files", ["workspace"]) })),
         h("li", {}, row({ label: "Settings", icon: "settings", onclick: navOpen(ctx, "admin", []), current: isCurrent(ctx, "admin", []) })),
       ]));
 }
 
 /** @param {Ctx} ctx @param {any} sq @param {MouseEvent} [e] */
 function openSavedQuery(ctx, sq, e) {
-  const existing = state.tabs.find((t) => t.ctx === ctx && t.view === "query" && t.instance?.savedId?.() === sq.id);
+  const existing = state.tabs.find((t) => t.ctx === ctx && t.view === "query" && (t.instance?.savedId?.() ?? store(`pond.draft.${t.id}`)?.identity?.savedId) === sq.id);
   if (existing && !(e?.metaKey || e?.ctrlKey)) return activateTab(existing);
   const tab = open(ctx, "query", [], { newTab: true });
   ensureInstance(tab).setSql(sq.query_text, { savedId: sq.id, name: sq.display_name });
@@ -798,11 +867,21 @@ function shortDir(dir) {
   return segs.length > 4 ? `${segs[0] || "/"}/…/${segs.slice(-2).join("/")}` : path;
 }
 
+function stampFocus(nodes, prefix) {
+  nodes.forEach((node, i) => {
+    if (!(node instanceof HTMLElement)) return;
+    const key = `${prefix}/${node.dataset.key || node.id || String(i)}`;
+    if (node.matches("button,a,input,select,textarea")) node.dataset.focusKey = key;
+    stampFocus([...node.children], key);
+  });
+}
+
 function renderNav() {
   const root = $("#nav-contexts");
   if (!state.contexts.length) return root.replaceChildren(h("p", { class: "nav-note" }, h("span", { class: "loading" })));
   const sections = state.contexts.filter((c) => !state.filter || c.running).map(contextSection);
-  root.replaceChildren(...sections);
+  stampFocus(sections, "nav");
+  reconcile(root, sections);
 }
 
 /* ---------- Rendering: tabs ---------- */
@@ -811,10 +890,10 @@ function renderTabs() {
   const strip = $("#tabs");
   const tabs = state.tabs.filter((t) => !t.agent || state.active === t || t.instance);
   const many = new Set(state.tabs.map((t) => t.ctx.id)).size > 1;
-  strip.replaceChildren(...tabs.map((t) => {
+  const items = tabs.map((t) => {
     const selected = t === state.active;
     const label = titleOf(t);
-    return h("div", { class: `tab${selected ? " selected" : ""}${t.agent ? " agent" : ""}`, style: `--ctx: var(--series-${t.ctx.slot + 1})` },
+    return h("div", { "data-key": t.id, class: `tab${selected ? " selected" : ""}${t.agent ? " agent" : ""}`, style: `--ctx: var(--series-${t.ctx.slot + 1})` },
       h("button", {
         class: "tab-main", role: "tab", id: `tab-${t.id}`, "aria-selected": String(selected), "aria-controls": `panel-${t.id}`,
         tabindex: selected ? "0" : "-1", title: `${t.ctx.name} · ${label}`,
@@ -822,11 +901,15 @@ function renderTabs() {
         onauxclick: (e) => e.button === 1 && closeTab(t),
         onkeydown: (e) => tabKeys(e, t),
       },
-      many && h("span", { class: "tab-ctx", "aria-label": `${t.ctx.name}:` }),
+      many && h("span", { class: "tab-context-name" }, `${t.ctx.name}: `),
       icon(t.agent ? "agent" : VIEW_ICONS[t.view]),
       h("span", { class: "tab-title" }, label)),
       h("button", { class: "tab-close", "aria-label": `Close ${label}`, title: "Close", onclick: () => closeTab(t) }));
-  }), h("button", { class: "tab-new", "aria-label": "New query", title: "New query", onclick: () => open(state.active?.ctx ?? self(), "query", [], { newTab: true }) }));
+  });
+  items.push(h("button", { class: "tab-new", "aria-label": "New query", title: "New query", onclick: () => open(state.active?.ctx ?? self(), "query", [], { newTab: true }) }));
+  items.push(h("button", { class: "btn ghost", disabled: !(store("pond.closedTabs")?.length), onclick: reopenClosedTab }, "Reopen closed tab"));
+  stampFocus(items, "tabs");
+  reconcile(strip, items);
   strip.querySelector(".tab.selected")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
@@ -872,7 +955,7 @@ function commands() {
       { group: "Actions", icon: "import", label: `Import a file${at}`, ctx, run: () => ensureInstance(open(ctx, "data", [])).importDialog?.() },
       { group: "Go to", icon: "home", label: `Overview of ${ctx.name}`, ctx, run: () => open(ctx, "home") },
       { group: "Go to", icon: "files", label: `Files${at}`, ctx, run: () => open(ctx, "files", ["dbfs"]) },
-      { group: "Go to", icon: "workspace", label: `Workspace${at}`, ctx, run: () => open(ctx, "files", ["workspace"]) },
+      { group: "Go to", icon: "workspace", label: `Scripts${at}`, ctx, run: () => open(ctx, "files", ["workspace"]) },
       { group: "Go to", icon: "job", label: `Jobs and runs${at}`, ctx, run: () => open(ctx, "jobs") },
       { group: "Go to", icon: "settings", label: `Settings${at}`, ctx, run: () => open(ctx, "admin") },
     );
@@ -888,6 +971,7 @@ function commands() {
     for (const j of ctx.nav.jobs ?? []) out.push({ group: "Jobs", icon: "job", label: j.settings?.name ?? `Job ${j.job_id}`, ctx, run: () => open(ctx, "jobs", ["job", String(j.job_id)]) });
   }
   out.push(
+    { group: "Page", icon: "query", label: "Reopen closed tab", run: reopenClosedTab },
     { group: "Page", icon: "theme", label: "Switch theme: system, light, dark", run: cycleTheme },
     { group: "Page", icon: "activity", label: "Show or hide activity", run: toggleActivity },
   );
@@ -987,9 +1071,21 @@ function toggleActivity(force) {
   renderActivity();
 }
 
+const narrow = matchMedia("(max-width: 760px)");
+function syncDrawer() {
+  const closed = narrow.matches && !document.body.classList.contains("nav-open");
+  const nav = $("#nav");
+  nav.inert = closed;
+  $("#main").inert = narrow.matches && !closed;
+  if (closed && nav.contains(document.activeElement)) $("#nav-btn").focus();
+  if (!narrow.matches && document.activeElement === $("#nav-btn")) $("#filter").focus();
+  $("#nav").setAttribute("aria-hidden", String(closed));
+}
+narrow.addEventListener("change", () => { closeDrawer(); syncDrawer(); });
 function closeDrawer() {
   document.body.classList.remove("nav-open");
   $("#nav-btn").setAttribute("aria-expanded", "false");
+  syncDrawer();
 }
 
 /* ---------- Wiring ---------- */
@@ -997,6 +1093,8 @@ function closeDrawer() {
 $("#nav-btn").addEventListener("click", () => {
   const isOpen = document.body.classList.toggle("nav-open");
   $("#nav-btn").setAttribute("aria-expanded", String(isOpen));
+  syncDrawer();
+  if (isOpen) $("#filter").focus();
 });
 $("#palette-btn").addEventListener("click", openPalette);
 $("#theme-btn").addEventListener("click", cycleTheme);
@@ -1066,6 +1164,7 @@ document.addEventListener("keydown", (e) => {
     open(state.active?.ctx ?? self(), "query", [], { newTab: true });
   } else if (e.key === "Escape" && document.body.classList.contains("nav-open")) {
     closeDrawer();
+    $("#nav-btn").focus();
   }
 });
 
@@ -1074,19 +1173,26 @@ window.addEventListener("hashchange", followHash);
 
 /* ---------- Start ---------- */
 
+syncDrawer();
 applyTheme(store("pond.theme") ?? "system");
 if (store("pond.activity")) toggleActivity(true);
 renderActivity();
 renderTrust();
 
-await loadContexts();
+while (!state.contexts.length) {
+  await loadContexts();
+  if (!state.contexts.length) {
+    $("#connection-status").textContent = "Pond connection lost. Retrying; browser drafts are kept.";
+    await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
+  }
+}
 const own = self();
 if (!store(STATE_KEY)?.navOpen?.[own.id]) {
   own.nav.open.add("ctx");
   own.nav.open.add("t:");
 }
 for (const ctx of state.contexts) if (ctx.running) watch(ctx);
-await loadStatus(own);
+
 renderNav(); // the config knows the home folder, which shortens paths
 
 const webmcp = registerWebMcp(agentUi());

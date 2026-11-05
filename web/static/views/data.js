@@ -254,10 +254,10 @@ export function createDataView(ui) {
       title: "New catalog",
       fields: [{ name: "name", label: "Name", required: true, pattern: NAME, hint: NAME_HINT }, { name: "comment", label: "Comment" }],
       submit: "Create catalog",
+      onSubmit: async (values) => lake.createCatalog(values.name, values.comment),
     });
     if (!v) return;
     await run(async () => {
-      await lake.createCatalog(v.name, v.comment);
       toast(`Created catalog ${v.name}`);
       await ui.refreshTree();
       ui.navigate("data", v.name);
@@ -269,10 +269,10 @@ export function createDataView(ui) {
       title: `New schema in ${catalogName}`,
       fields: [{ name: "name", label: "Name", required: true, pattern: NAME, hint: NAME_HINT }, { name: "comment", label: "Comment" }],
       submit: "Create schema",
+      onSubmit: async (values) => lake.createSchema(catalogName, values.name, values.comment),
     });
     if (!v) return;
     await run(async () => {
-      await lake.createSchema(catalogName, v.name, v.comment);
       toast(`Created schema ${catalogName}.${v.name}`);
       await ui.refreshTree();
       ui.navigate("data", `${catalogName}.${v.name}`);
@@ -285,10 +285,10 @@ export function createDataView(ui) {
       intro: "A volume is a folder for files in Unity Catalog, at /Volumes/catalog/schema/volume.",
       fields: [{ name: "name", label: "Name", required: true, pattern: NAME, hint: NAME_HINT }, { name: "comment", label: "Comment" }],
       submit: "Create volume",
+      onSubmit: async (values) => lake.createVolume(c, s, values.name, values.comment),
     });
     if (!v) return;
     await run(async () => {
-      await lake.createVolume(c, s, v.name, v.comment);
       toast(`Created volume ${c}.${s}.${v.name}`);
       await ui.refreshTree();
       ui.navigate("data", "volume", `${c}.${s}.${v.name}`);
@@ -321,24 +321,17 @@ export function createDataView(ui) {
 
   async function importDialog(file, defaults = {}) {
     const catalogs = await lake.listCatalogs();
-    if (!catalogs.length) return toast("Create a catalog first, then import into one of its schemas.", "err");
     const fromView = current.name?.split(".") ?? [];
-    const catalogName = defaults.catalog ?? (catalogs.some((c) => c.name === fromView[0]) ? fromView[0] : catalogs[0].name);
-    const schemas = await lake.listSchemas(catalogName);
-    const options = [];
-    for (const c of catalogs) {
-      const ss = c.name === catalogName ? schemas : await lake.listSchemas(c.name);
-      for (const s of ss) options.push(`${c.name}.${s.name}`);
-    }
-    if (!options.length) return toast("Create a schema first.", "err");
-    const target = defaults.schema ? `${defaults.catalog}.${defaults.schema}` : fromView.length >= 2 ? `${fromView[0]}.${fromView[1]}` : options[0];
-
+    const catalogName = defaults.catalog ?? fromView[0] ?? catalogs[0]?.name ?? "pond";
+    const schemas = catalogs.some((c) => c.name === catalogName) ? await lake.listSchemas(catalogName) : [];
+    let loaded = /** @type {any} */ (null);
     const v = await formDialog({
-      title: "Import file",
-      intro: "CSV, TSV, JSON, JSON Lines or Parquet. The file is kept in the schema's “imports” volume and loaded into a table.",
+      title: `Import file into ${ui.ctx?.name ?? "this lake"}`,
+      intro: "CSV, TSV, JSON, JSON Lines or Parquet. Missing catalogs and schemas are created. Each upload is kept as a separate file in the imports volume.",
       fields: [
         !file && { name: "file", label: "File", type: "file", required: true, accept: ".csv,.tsv,.json,.jsonl,.ndjson,.parquet" },
-        { name: "target", label: "Schema", type: "select", options, value: target },
+        { name: "catalog", label: "Catalog", value: catalogName, pattern: "[^.]+", required: true, hint: `Existing: ${catalogs.map((c) => c.name).join(", ") || "none"}. A new name creates a catalog.` },
+        { name: "schema", label: "Schema", value: defaults.schema ?? fromView[1] ?? schemas[0]?.name ?? "default", pattern: "[^.]+", required: true, hint: `Existing in ${catalogName}: ${schemas.map((x) => x.name).join(", ") || "none"}.` },
         { name: "table", label: "Table", value: defaults.table ?? (file ? lake.tableNameFor(file.name) : ""), placeholder: "Defaults to the file name", pattern: NAME },
         { name: "mode", label: "If the table exists", type: "select", value: defaults.mode ?? "create", options: [
           { value: "create", label: "Fail" }, { value: "replace", label: "Replace it" }, { value: "append", label: "Append rows" }] },
@@ -349,18 +342,17 @@ export function createDataView(ui) {
         if (!f) return "Choose a file.";
         if (!lake.formatOf(f.name)) return `${f.name} is not CSV, TSV, JSON, JSON Lines or Parquet.`;
       },
+      onSubmit: async (values) => {
+        const f = file ?? values.file;
+        const name = values.table || lake.tableNameFor(f.name);
+        if (values.mode === "replace" && !await confirmDialog({ title: `Replace ${values.catalog}.${values.schema}.${name} in ${ui.ctx?.name ?? "this lake"}?`, body: "The current rows are replaced by this file.", confirm: "Replace" })) throw new Error("Replacement cancelled. Select another mode or cancel this import.");
+        loaded = await lake.importFile({ file: f, catalog: values.catalog, schema: values.schema, table: name, mode: values.mode });
+      },
     });
     if (!v) return;
-    const f = file ?? v.file;
-    const [c, s] = v.target.split(".");
-    const tableName = v.table || lake.tableNameFor(f.name);
-    await run(async () => {
-      toast(`Importing ${f.name}…`);
-      const res = await lake.importFile({ file: f, catalog: c, schema: s, table: tableName, mode: v.mode });
-      toast(`Loaded ${res.rows} rows into ${res.table}`);
-      await ui.refreshTree();
-      ui.navigate("data", res.table);
-    });
+    toast(`Loaded ${loaded.rows} rows into ${loaded.table}`);
+    await ui.refreshTree();
+    ui.navigate("data", loaded.table);
   }
 
   const otherContexts = () => (ui.contexts?.() ?? []).filter((c) => c.running && c !== ui.ctx);
@@ -368,6 +360,8 @@ export function createDataView(ui) {
   // Copies a table into another running context, through a Parquet file.
   async function copyDialog(t) {
     const targets = otherContexts();
+    let copied = /** @type {any} */ (null);
+    let destination = /** @type {any} */ (null);
     const v = await formDialog({
       title: `Copy ${t.name} to another context`,
       intro: "The table is copied as it is now. Later changes here don't follow it.",
@@ -380,21 +374,18 @@ export function createDataView(ui) {
           { value: "create", label: "Fail" }, { value: "replace", label: "Replace it" }, { value: "append", label: "Append rows" }] },
       ],
       submit: "Copy",
+      onSubmit: async (values) => {
+        const target = targets.find((c) => c.id === values.target);
+        if (!target) throw new Error("The destination context is no longer available.");
+        if (values.mode === "replace" && !await confirmDialog({ title: `Replace ${values.catalog}.${values.schema}.${values.table} in ${target.name}?`, body: "Its rows are replaced by this table's rows.", confirm: "Replace" })) throw new Error("Replacement cancelled. Choose another mode.");
+        copied = await copyTable(lake, target.lake, { source: t.full_name, catalog: values.catalog, schema: values.schema, table: values.table, mode: values.mode });
+        destination = target;
+      },
     });
     if (!v) return;
-    const target = targets.find((c) => c.id === v.target);
-    if (!target) return;
-    if (v.mode === "replace" && !(await confirmDialog({
-      title: `Replace ${v.catalog}.${v.schema}.${v.table} in ${target.name}?`,
-      body: "Its rows there are replaced by this table's.", confirm: "Replace",
-    }))) return;
-    await run(async () => {
-      toast(`Copying ${t.full_name} to ${target.name}…`);
-      const res = await copyTable(lake, target.lake, { source: t.full_name, catalog: v.catalog, schema: v.schema, table: v.table, mode: v.mode });
-      toast(`Copied ${res.rows} rows to ${res.table} in ${target.name}`);
-      await ui.refreshContext?.(target);
-      ui.openIn?.(target, "data", [res.table]);
-    });
+    toast(`Copied ${copied.rows} rows to ${copied.table} in ${destination.name}`);
+    await ui.refreshContext?.(destination);
+    ui.openIn?.(destination, "data", [copied.table]);
   }
 
   async function run(fn) {
