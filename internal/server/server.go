@@ -23,6 +23,7 @@ import (
 
 var proxyPrefixes = []string{"/api/", "/_minilake/", "/mcp"}
 
+// Options configures the handler New returns.
 type Options struct {
 	Host string // bind host, accepted in the Host header alongside loopback names
 	// Extra names accepted in the Host header, such as the machine's addresses when shared.
@@ -40,6 +41,8 @@ type handler struct {
 	proxy   *httputil.ReverseProxy
 }
 
+// New returns pond's HTTP handler: the embedded UI, /pond/config, and a proxy to
+// MiniLake for /api, /_minilake and /mcp. It refuses requests for unknown hosts.
 func New(o Options) http.Handler {
 	target := o.Lake.Target()
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -81,7 +84,7 @@ func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
 func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s", r.Method, r.URL.RequestURI())
+		log.Printf("%s %q", r.Method, r.URL.RequestURI()) //nolint:gosec // G706: %q escapes it, and only POND_VERBOSE logs
 		next.ServeHTTP(w, r)
 	})
 }
@@ -160,7 +163,7 @@ func (h *handler) static(w http.ResponseWriter, urlPath string) {
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Length", fmt.Sprint(len(body)))
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(body)
+	w.Write(body) //nolint:gosec // G705: body is an embedded UI file, not user input
 }
 
 func sendJSON(w http.ResponseWriter, status int, payload any) {

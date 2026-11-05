@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"strconv"
 	"testing"
@@ -51,7 +52,7 @@ func TestSubcommands(t *testing.T) {
 	if a, _ := parse([]string{"version"}); a.command != "version" {
 		t.Errorf("version: %+v", a)
 	}
-	if _, err := parse([]string{"--help"}); err != errHelp {
+	if _, err := parse([]string{"--help"}); !errors.Is(err, errHelp) {
 		t.Errorf("help: %v", err)
 	}
 	if _, err := parse([]string{"--bogus"}); err == nil {

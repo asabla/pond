@@ -66,7 +66,7 @@ func (f *fakeMiniLake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/mcp":
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("mcp-session-id", "abc")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
 		io.WriteString(w, "event: message\ndata: first\n\n")
 		w.(http.Flusher).Flush()
@@ -161,7 +161,7 @@ func (e *env) config() map[string]any {
 
 func TestServesIndex(t *testing.T) {
 	resp, body := setup(t, nil, "").request("GET", "/", nil, nil)
-	if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
 		t.Fatalf("got %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 	if resp.Header.Get("Cache-Control") != "no-cache" {
@@ -187,11 +187,11 @@ func TestBlocksPathTraversal(t *testing.T) {
 			t.Fatal(err)
 		}
 		conn.Close()
-		if resp.StatusCode != 404 {
+		if resp.StatusCode != http.StatusNotFound {
 			t.Errorf("%s: status %d", target, resp.StatusCode)
 		}
 	}
-	if resp, _ := e.request("GET", "/nope.js", nil, nil); resp.StatusCode != 404 {
+	if resp, _ := e.request("GET", "/nope.js", nil, nil); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("missing file: status %d", resp.StatusCode)
 	}
 }
@@ -200,11 +200,11 @@ func TestAcceptsAllowedHostsWhenShared(t *testing.T) {
 	e := setup(t, nil, "")
 	e.pond.Config.Handler = New(Options{Host: "0.0.0.0", AllowedHosts: []string{"192.168.1.5", "My-Mac.local"}, Lake: e.client(), Static: e.static()})
 	for _, host := range []string{"192.168.1.5:8700", "my-mac.local:8700"} {
-		if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": host}); resp.StatusCode != 200 {
+		if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": host}); resp.StatusCode != http.StatusOK {
 			t.Errorf("%s: status %d", host, resp.StatusCode)
 		}
 	}
-	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "attacker.example"}); resp.StatusCode != 403 {
+	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "attacker.example"}); resp.StatusCode != http.StatusForbidden {
 		t.Errorf("attacker: status %d", resp.StatusCode)
 	}
 }
@@ -212,23 +212,23 @@ func TestAcceptsAllowedHostsWhenShared(t *testing.T) {
 func TestHostFlagMatchesAnyCase(t *testing.T) {
 	e := setup(t, nil, "")
 	e.pond.Config.Handler = New(Options{Host: "MyBox", Lake: e.client(), Static: e.static()})
-	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "MyBox:8700"}); resp.StatusCode != 200 {
+	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "MyBox:8700"}); resp.StatusCode != http.StatusOK {
 		t.Errorf("status %d", resp.StatusCode)
 	}
 }
 
 func TestServesStaticFilesToHead(t *testing.T) {
-	if resp, body := setup(t, nil, "").request("HEAD", "/app.js", nil, nil); resp.StatusCode != 200 || len(body) != 0 {
+	if resp, body := setup(t, nil, "").request("HEAD", "/app.js", nil, nil); resp.StatusCode != http.StatusOK || len(body) != 0 {
 		t.Errorf("HEAD: status %d, %d body bytes", resp.StatusCode, len(body))
 	}
 }
 
 func TestRejectsForeignHostHeader(t *testing.T) {
 	e := setup(t, nil, "")
-	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "attacker.example"}); resp.StatusCode != 403 {
+	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "attacker.example"}); resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status %d", resp.StatusCode)
 	}
-	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "localhost:9"}); resp.StatusCode != 200 {
+	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "localhost:9"}); resp.StatusCode != http.StatusOK {
 		t.Errorf("localhost: status %d", resp.StatusCode)
 	}
 }
@@ -281,14 +281,14 @@ func TestConfigReportsUnreachableLake(t *testing.T) {
 
 func TestProxiesAPIRequests(t *testing.T) {
 	resp, body := setup(t, nil, "").request("POST", "/api/2.0/sql/statements", map[string]string{"statement": "SELECT 1"}, nil)
-	if resp.StatusCode != 200 || strings.TrimSpace(string(body)) != `{"echo":{"statement":"SELECT 1"}}` {
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != `{"echo":{"statement":"SELECT 1"}}` {
 		t.Errorf("got %d %s", resp.StatusCode, body)
 	}
 }
 
 func TestProxiesUpstreamErrors(t *testing.T) {
 	resp, body := setup(t, nil, "").request("GET", "/api/2.1/unity-catalog/nope", nil, nil)
-	if resp.StatusCode != 404 || strings.TrimSpace(string(body)) != `{"detail":"Not Found"}` {
+	if resp.StatusCode != http.StatusNotFound || strings.TrimSpace(string(body)) != `{"detail":"Not Found"}` {
 		t.Errorf("got %d %s", resp.StatusCode, body)
 	}
 }
@@ -296,7 +296,7 @@ func TestProxiesUpstreamErrors(t *testing.T) {
 func TestProxiesMCPStreamAndHeaders(t *testing.T) {
 	e := setup(t, nil, "")
 	e.fake.release = make(chan struct{})
-	req, _ := http.NewRequest("POST", e.pond.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	req, _ := http.NewRequest(http.MethodPost, e.pond.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Origin", "http://localhost:1")
@@ -305,7 +305,7 @@ func TestProxiesMCPStreamAndHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 || resp.Header.Get("mcp-session-id") != "abc" {
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("mcp-session-id") != "abc" {
 		t.Fatalf("got %d, session %q", resp.StatusCode, resp.Header.Get("mcp-session-id"))
 	}
 	// The first event must arrive while the upstream is still holding the stream open.
@@ -339,13 +339,13 @@ func TestUnreachableMiniLakeIs502(t *testing.T) {
 	resp, body := e.request("GET", "/_minilake/health", nil, nil)
 	var out map[string]string
 	json.Unmarshal(body, &out)
-	if resp.StatusCode != 502 || out["error_code"] != "MINILAKE_UNREACHABLE" {
+	if resp.StatusCode != http.StatusBadGateway || out["error_code"] != "MINILAKE_UNREACHABLE" {
 		t.Errorf("got %d %s", resp.StatusCode, body)
 	}
 }
 
 func TestRejectsNonGETOutsideProxy(t *testing.T) {
-	if resp, _ := setup(t, nil, "").request("POST", "/", nil, nil); resp.StatusCode != 405 {
+	if resp, _ := setup(t, nil, "").request("POST", "/", nil, nil); resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status %d", resp.StatusCode)
 	}
 }

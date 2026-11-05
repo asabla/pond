@@ -33,10 +33,32 @@ linters:
         - (*net/http.Server).Close
     gosec:
       excludes:
+        - G104 # unhandled errors: errcheck reports these, with its exclusions
         - G204 # pond runs the docker CLI with arguments it builds; that is its job
         - G301 # state folders are 0755 like the project folder they live in
+        - G302 # lock and snapshot files are 0644: not secret
         - G304 # reading files from paths the user gave pond is the point
         - G306 # run and port files are 0644: not secret, read by other pond commands
+        - G702 # taint: commands are docker and the OS's URL opener, with args pond builds
+        - G703 # taint: paths come from the user running pond, on their own machine
+    staticcheck:
+      checks:
+        - all
+        - -ST1000 # package comments: each package has one where it helps
+        - -ST1005 # pond shows errors to people as full sentences
+    revive:
+      rules:
+        - name: exported
+        - name: unused-parameter
+        - name: var-naming
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: context-as-argument
+        - name: errorf
+        - name: blank-imports
+        - name: receiver-naming
+        - name: increment-decrement
   exclusions:
     presets:
       - std-error-handling

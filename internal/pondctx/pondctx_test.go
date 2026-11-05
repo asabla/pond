@@ -167,7 +167,7 @@ func TestStopRemovesEverythingOnTheContextNetwork(t *testing.T) {
 
 func TestStartScopesContainerToContext(t *testing.T) {
 	f := setup(t)
-	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{}")) }))
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("{}")) }))
 	defer health.Close()
 	port := health.Listener.Addr().String()[strings.LastIndex(health.Listener.Addr().String(), ":")+1:]
 	t.Setenv("FAKE_PORT", port)
@@ -216,14 +216,14 @@ func TestStartRefusesPathsDockerCannotSee(t *testing.T) {
 func TestReportsDockerNotRunning(t *testing.T) {
 	setup(t)
 	t.Setenv("FAKE_DOCKER_DOWN", "1")
-	if err := EnsureDocker(); err == nil || !strings.Contains(err.Error(), "not running") {
+	if err := EnsureDocker(context.Background()); err == nil || !strings.Contains(err.Error(), "not running") {
 		t.Errorf("err = %v", err)
 	}
 }
 
 func TestReportsDockerNotInstalled(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	if err := EnsureDocker(); err == nil || !strings.Contains(err.Error(), "Docker CLI not found") {
+	if err := EnsureDocker(context.Background()); err == nil || !strings.Contains(err.Error(), "Docker CLI not found") {
 		t.Errorf("err = %v", err)
 	}
 }

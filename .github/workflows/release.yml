@@ -20,7 +20,9 @@ jobs:
           fetch-depth: 0 # GoReleaser builds the changelog from history
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          # go.mod sets the oldest Go that builds pond; test and ship with the
+          # current stable release, which has the standard library's security fixes.
+          go-version: stable
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"

@@ -12,11 +12,15 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The oldest Go that go.mod allows, and the stable release that ships.
+        go: ["1.25", stable]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
       # The UI tests (web/) run under node --test; go test skips them without node.
       - uses: actions/setup-node@v5
         with:
@@ -32,10 +36,12 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          # go.mod sets the oldest Go that builds pond; test and ship with the
+          # current stable release, which has the standard library's security fixes.
+          go-version: stable
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.15.0
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 

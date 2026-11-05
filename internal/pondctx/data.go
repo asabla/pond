@@ -55,9 +55,16 @@ func Export(c Context, w io.Writer) error {
 	if _, err := os.Stat(c.DataPath()); err != nil {
 		return fmt.Errorf("%s has no lake data to export", c.Name())
 	}
+	// Open files through a root, so a file swapped for a symlink mid-walk can't make the
+	// snapshot read something outside the lake.
+	root, err := os.OpenRoot(c.DataPath())
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
-	err := filepath.WalkDir(c.DataPath(), func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(c.DataPath(), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -69,7 +76,7 @@ func Export(c Context, w io.Writer) error {
 		if d.IsDir() && isCache(rel) {
 			return filepath.SkipDir
 		}
-		if rel == ".pond-mount" || !(d.IsDir() || d.Type().IsRegular()) {
+		if rel == ".pond-mount" || (!d.IsDir() && !d.Type().IsRegular()) {
 			return nil // skip the mount marker, symlinks, sockets and the like
 		}
 		info, err := d.Info()
@@ -91,7 +98,7 @@ func Export(c Context, w io.Writer) error {
 		if d.IsDir() {
 			return nil
 		}
-		f, err := os.Open(path)
+		f, err := root.Open(filepath.FromSlash(rel))
 		if err != nil {
 			return err
 		}
@@ -139,11 +146,13 @@ func Import(c Context, r io.Reader) error {
 		return err
 	}
 	if err := os.Rename(staging, c.DataPath()); err != nil {
-		os.Rename(old, c.DataPath())
+		if rerr := os.Rename(old, c.DataPath()); rerr != nil {
+			return fmt.Errorf("%w; your previous data is in %s", err, old)
+		}
 		return err
 	}
 	for _, dir := range cacheDirs { // snapshots leave caches out; keep the ones already here
-		os.Rename(filepath.Join(old, dir), filepath.Join(c.DataPath(), dir))
+		_ = os.Rename(filepath.Join(old, dir), filepath.Join(c.DataPath(), dir)) // best effort
 	}
 	os.RemoveAll(old) // the import is done; RecoverImport cleans up whatever is left
 	return nil
@@ -155,14 +164,16 @@ func (c Context) oldDataPath() string { return filepath.Join(c.StateDir(), "data
 // data folder: if data is missing, data.old holds the only copy and is put back.
 func RecoverImport(c Context) error {
 	old := c.oldDataPath()
-	if _, err := os.Stat(old); err != nil {
-		return nil
+	if _, err := os.Stat(old); errors.Is(err, fs.ErrNotExist) {
+		return nil // no interrupted import
+	} else if err != nil {
+		return err
 	}
 	if _, err := os.Stat(c.DataPath()); os.IsNotExist(err) {
 		return os.Rename(old, c.DataPath())
 	}
 	for _, dir := range cacheDirs {
-		os.Rename(filepath.Join(old, dir), filepath.Join(c.DataPath(), dir))
+		_ = os.Rename(filepath.Join(old, dir), filepath.Join(c.DataPath(), dir)) // best effort
 	}
 	return os.RemoveAll(old)
 }
@@ -177,7 +188,7 @@ func unpack(r io.Reader, dir string) error {
 	if err := os.MkdirAll(dir, 0o777); err != nil {
 		return err
 	}
-	os.Chmod(dir, 0o777) // MiniLake may write as another user, like the data folder it replaces
+	_ = os.Chmod(dir, 0o777) // MiniLake may write as another user, like the data folder it replaces
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -205,7 +216,8 @@ func unpack(r io.Reader, dir string) error {
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(f, tr)
+			// A snapshot is the user's own file, so its size isn't capped.
+			_, err = io.Copy(f, tr) //nolint:gosec // G110: see above
 			if cerr := f.Close(); err == nil {
 				err = cerr
 			}

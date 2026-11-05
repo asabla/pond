@@ -18,6 +18,7 @@ import (
 
 const warehouseName = "pond"
 
+// Client calls the MiniLake APIs pond uses itself. It is safe for concurrent use.
 type Client struct {
 	url    string
 	target *url.URL
@@ -27,6 +28,7 @@ type Client struct {
 	warehouseID string
 }
 
+// New returns a client for the MiniLake at rawURL, such as http://127.0.0.1:8000.
 func New(rawURL string) (*Client, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
@@ -234,7 +236,7 @@ func (c *Client) CreateCatalog(ctx context.Context, name string, ifNotExists boo
 			return nil
 		}
 		var lerr *Error
-		if err != nil && !(errors.As(err, &lerr) && lerr.Status == http.StatusNotFound) {
+		if err != nil && (!errors.As(err, &lerr) || lerr.Status != http.StatusNotFound) {
 			return err
 		}
 	}
@@ -251,7 +253,7 @@ func (c *Client) CreateSchema(ctx context.Context, catalog, name string, ifNotEx
 			return nil
 		}
 		var lerr *Error
-		if !(errors.As(err, &lerr) && lerr.Status == http.StatusNotFound) {
+		if !errors.As(err, &lerr) || lerr.Status != http.StatusNotFound {
 			return err
 		}
 	}
@@ -320,7 +322,7 @@ func (c *Client) RunPython(ctx context.Context, name, path, source string) (*Run
 			if output, err := c.requestJSON(ctx, http.MethodGet, fmt.Sprintf("/api/2.2/jobs/runs/get-output?run_id=%d", outputID), nil); err == nil {
 				var o struct{ Logs, Error string }
 				raw, _ := json.Marshal(output)
-				json.Unmarshal(raw, &o)
+				_ = json.Unmarshal(raw, &o) // it came from json.Marshal
 				res.Logs = o.Logs
 				if o.Error != "" {
 					res.Error = o.Error

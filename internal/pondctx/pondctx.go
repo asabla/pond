@@ -30,7 +30,9 @@ import (
 
 const (
 	defaultImage = "ghcr.io/dmux/minilake:1.9.0"
-	Label        = "pond.context"
+	// Label marks pond's containers and networks; its value is the context ID.
+	Label = "pond.context"
+	// LabelDir records the context's directory on its containers.
 	LabelDir     = "pond.dir"
 	minilakePort = 8000
 	// DataDir is MINILAKE_DATA_DIR inside the image; also reported to the UI as data_root.
@@ -40,6 +42,7 @@ const (
 
 var errDockerNotFound = errors.New("Docker CLI not found. Install Docker Desktop, OrbStack or colima.")
 
+// DefaultImage is the MiniLake image to run, unless POND_MINILAKE_IMAGE overrides it.
 func DefaultImage() string {
 	if v, ok := os.LookupEnv("POND_MINILAKE_IMAGE"); ok {
 		return v
@@ -47,6 +50,7 @@ func DefaultImage() string {
 	return defaultImage
 }
 
+// Context is a directory with its own lake: state in .pond/, plus its own container and network.
 type Context struct {
 	Dir string
 }
@@ -59,6 +63,7 @@ type Description struct {
 	Container string `json:"container"`
 }
 
+// ForDir returns the context for path, made absolute with ~ expanded and symlinks resolved.
 func ForDir(path string) Context {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -77,6 +82,7 @@ func ForDir(path string) Context {
 
 var unsafeName = regexp.MustCompile(`[^a-z0-9_.-]+`)
 
+// Name is the directory's base name, made safe for Docker names.
 func (c Context) Name() string {
 	name := unsafeName.ReplaceAllString(strings.ToLower(filepath.Base(c.Dir)), "-")
 	if name = strings.Trim(name, "-."); name == "" {
@@ -91,14 +97,22 @@ func (c Context) ID() string {
 	return c.Name() + "-" + hex.EncodeToString(sum[:])[:6]
 }
 
-func (c Context) StateDir() string  { return filepath.Join(c.Dir, ".pond") }
-func (c Context) Network() string   { return "pond-" + c.ID() }
+// StateDir is the context's .pond folder: lake data, lock, run and port files.
+func (c Context) StateDir() string { return filepath.Join(c.Dir, ".pond") }
+
+// Network is the Docker network MiniLake and its Spark job containers share.
+func (c Context) Network() string { return "pond-" + c.ID() }
+
+// Container is the name of the context's MiniLake container.
 func (c Context) Container() string { return "pond-" + c.ID() + "-minilake" }
-func (c Context) RunFile() string   { return filepath.Join(c.StateDir(), "run.json") }
+
+// RunFile describes the running pond (PID and URLs) while it holds the lock.
+func (c Context) RunFile() string { return filepath.Join(c.StateDir(), "run.json") }
 
 // PortFile is kept between runs so the context's URLs, and MCP registrations using them, stay put.
 func (c Context) PortFile() string { return filepath.Join(c.StateDir(), "port") }
 
+// PreferredPort is the UI port of the last run, or 0 when there is none.
 func (c Context) PreferredPort() int {
 	b, err := os.ReadFile(c.PortFile())
 	if err != nil {
@@ -111,6 +125,7 @@ func (c Context) PreferredPort() int {
 	return port
 }
 
+// Describe returns what the UI shows about the context.
 func (c Context) Describe() *Description {
 	return &Description{Name: c.Name(), ID: c.ID(), Dir: c.Dir, Container: c.Container()}
 }
@@ -141,14 +156,16 @@ func docker(ctx context.Context, check bool, args ...string) (string, error) {
 	return out, nil
 }
 
-func EnsureDocker() error {
-	_, err := docker(context.Background(), true, "info", "--format", "{{.ServerVersion}}")
+// EnsureDocker checks that the docker CLI is installed and its daemon answers.
+func EnsureDocker(ctx context.Context) error {
+	_, err := docker(ctx, true, "info", "--format", "{{.ServerVersion}}")
 	if err == nil || errors.Is(err, errDockerNotFound) {
 		return err
 	}
 	return errors.New("Docker is not running. Start Docker Desktop, OrbStack or `colima start`, then retry.")
 }
 
+// RunInfo is the content of the run file.
 type RunInfo struct {
 	PID      int    `json:"pid"`
 	UI       string `json:"ui,omitempty"`
@@ -205,6 +222,7 @@ func tryLock(c Context) (*Lock, error) {
 	return &Lock{f}, nil
 }
 
+// Release lets other pond commands use the context. It is safe on a nil Lock.
 func (l *Lock) Release() {
 	if l != nil {
 		l.f.Close()
@@ -229,7 +247,7 @@ func Serving(c Context) *RunInfo {
 	}
 	info := RunInfo{}
 	if b, err := os.ReadFile(c.RunFile()); err == nil {
-		json.Unmarshal(b, &info)
+		_ = json.Unmarshal(b, &info) // a damaged run file only loses the URLs
 	}
 	return &info
 }
@@ -253,11 +271,12 @@ func WriteRunFile(c Context, info RunInfo) error {
 func bindMount(src, dst string) string {
 	var b strings.Builder
 	w := csv.NewWriter(&b)
-	w.Write([]string{"type=bind", "source=" + src, "target=" + dst})
+	_ = w.Write([]string{"type=bind", "source=" + src, "target=" + dst}) // a Builder can't fail
 	w.Flush()
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
+// PrepareStateDir creates .pond/data and a .gitignore that keeps .pond out of the repo.
 func PrepareStateDir(c Context) error {
 	if err := os.MkdirAll(c.DataPath(), 0o755); err != nil {
 		return err
@@ -272,10 +291,10 @@ func PrepareStateDir(c Context) error {
 
 // Start runs MiniLake for c and returns its base URL on the host.
 func Start(ctx context.Context, c Context, image string, onStatus func(string)) (string, error) {
-	if err := EnsureDocker(); err != nil {
+	if err := EnsureDocker(ctx); err != nil {
 		return "", err
 	}
-	Stop(c) // clear leftovers from a run that did not shut down cleanly
+	Stop(c) //nolint:contextcheck // clear leftovers; Stop ignores cancellation on purpose
 	if err := PrepareStateDir(c); err != nil {
 		return "", err
 	}
@@ -352,7 +371,11 @@ func waitHealthy(ctx context.Context, c Context, url string, timeout time.Durati
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if resp, err := client.Get(url + "/_minilake/health"); err == nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/_minilake/health", nil)
+		if err != nil {
+			return err
+		}
+		if resp, err := client.Do(req); err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return nil
@@ -380,7 +403,7 @@ func waitHealthy(ctx context.Context, c Context, url string, timeout time.Durati
 func Stop(c Context) {
 	bg := context.Background()
 	// Graceful stop first so MINILAKE_PERSIST writes its snapshot.
-	docker(bg, false, "stop", "-t", strconv.Itoa(stopTimeout), c.Container())
+	_, _ = docker(bg, false, "stop", "-t", strconv.Itoa(stopTimeout), c.Container())
 	attached, _ := docker(bg, false, "network", "inspect", "-f", "{{range .Containers}}{{.Name}} {{end}}", c.Network())
 	rm := []string{"rm", "-f", c.Container()}
 	for _, name := range strings.Fields(attached) {
@@ -388,8 +411,8 @@ func Stop(c Context) {
 			rm = append(rm, name)
 		}
 	}
-	docker(bg, false, rm...)
-	docker(bg, false, "network", "rm", c.Network())
+	_, _ = docker(bg, false, rm...)
+	_, _ = docker(bg, false, "network", "rm", c.Network())
 }
 
 // Exists reports whether the context's MiniLake container exists, running or not.
@@ -399,14 +422,15 @@ func Exists(c Context) bool {
 }
 
 // LogsCommand prints the context's MiniLake logs. tail is a line count or "all".
-func LogsCommand(c Context, follow bool, tail string) *exec.Cmd {
+func LogsCommand(ctx context.Context, c Context, follow bool, tail string) *exec.Cmd {
 	args := []string{"logs", "--tail", tail}
 	if follow {
 		args = append(args, "--follow")
 	}
-	return exec.Command("docker", append(args, c.Container())...)
+	return exec.CommandContext(ctx, "docker", append(args, c.Container())...)
 }
 
+// Running is one running context, as `pond ls` shows it.
 type Running struct {
 	Name, Dir, UI, Status string
 }

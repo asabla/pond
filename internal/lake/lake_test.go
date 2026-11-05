@@ -53,16 +53,16 @@ func (f *fakeLake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&body)
 	p := r.URL.Path
 	switch {
-	case p == "/api/2.0/sql/warehouses" && r.Method == "GET":
+	case p == "/api/2.0/sql/warehouses" && r.Method == http.MethodGet:
 		list := []map[string]string{}
 		for _, id := range f.warehouses {
 			list = append(list, map[string]string{"id": id})
 		}
 		send(w, 200, map[string]any{"warehouses": list})
-	case p == "/api/2.0/sql/warehouses" && r.Method == "POST":
+	case p == "/api/2.0/sql/warehouses" && r.Method == http.MethodPost:
 		f.warehouses = append(f.warehouses, "wh1")
 		send(w, 200, map[string]string{"id": "wh1"})
-	case p == "/api/2.0/sql/statements" && r.Method == "POST":
+	case p == "/api/2.0/sql/statements" && r.Method == http.MethodPost:
 		stmt := body["statement"].(string)
 		f.polls[stmt] = f.statements[stmt]
 		f.answerStatement(w, stmt)
@@ -276,7 +276,7 @@ func TestMCPEnabled(t *testing.T) {
 	if c.MCPEnabled(context.Background()) {
 		t.Error("404 /mcp reported as enabled")
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, "event: ok\n\n")
 	}))
 	defer srv.Close()

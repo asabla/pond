@@ -237,7 +237,7 @@ func bind(host string, port int, explicit bool) (net.Listener, error) {
 	}
 	var last error
 	for _, p := range candidates {
-		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(p)))
+		ln, err := new(net.ListenConfig).Listen(context.Background(), "tcp", net.JoinHostPort(host, strconv.Itoa(p)))
 		if err == nil {
 			return ln, nil
 		}
@@ -247,7 +247,7 @@ func bind(host string, port int, explicit bool) (net.Listener, error) {
 	for i, p := range candidates {
 		tried[i] = strconv.Itoa(p)
 	}
-	return nil, fmt.Errorf("No free port for the UI (tried %s): %v", strings.Join(tried, ", "), last)
+	return nil, fmt.Errorf("No free port for the UI (tried %s): %w", strings.Join(tried, ", "), last)
 }
 
 func isLoopback(host string) bool {
@@ -368,7 +368,10 @@ func up(a *args) error {
 	srv = &http.Server{Handler: server.New(server.Options{
 		Host: a.host, AllowedHosts: allowedHosts, Lake: client, Context: ctxInfo, DataRoot: dataRoot,
 		Static: static, Version: version,
-	})}
+	}),
+		// Bounds only the request headers; bodies and MCP streams can take as long as they need.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	uiPort := ln.Addr().(*net.TCPAddr).Port
 	if c != nil && !a.portExplicit && port != uiPort && port == c.PreferredPort() {
@@ -432,17 +435,19 @@ func up(a *args) error {
 }
 
 func openBrowser(url string) {
+	// The opener hands the URL to the browser and exits; it isn't tied to pond's lifetime.
+	ctx := context.Background()
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.CommandContext(ctx, "open", url)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", url)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.CommandContext(ctx, "xdg-open", url)
 	}
 	if cmd.Start() == nil {
-		go cmd.Wait()
+		go func() { _ = cmd.Wait() }()
 	}
 }
 
@@ -510,7 +515,7 @@ func logs(a *args) error {
 	if !pondctx.Exists(c) {
 		return fmt.Errorf("%s has no MiniLake container. Start it with `%s`", c.Name(), startCommand(a.dir))
 	}
-	cmd := pondctx.LogsCommand(c, a.follow, a.tail)
+	cmd := pondctx.LogsCommand(context.Background(), c, a.follow, a.tail)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	// Ctrl-C reaches docker directly and ends `logs -f`; pond just waits for it.
 	signal.Ignore(os.Interrupt)
