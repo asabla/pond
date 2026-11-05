@@ -47,6 +47,12 @@ func (c *Client) URL() string { return c.url }
 // Target is the scheme and host requests are proxied to.
 func (c *Client) Target() *url.URL { return c.target }
 
+// Health checks the service without creating a warehouse or executing SQL.
+func (c *Client) Health(ctx context.Context) error {
+	_, err := c.requestJSONTimeout(ctx, 2*time.Second, http.MethodGet, "/_minilake/health", nil)
+	return err
+}
+
 func (c *Client) requestJSON(ctx context.Context, method, path string, body any) (map[string]json.RawMessage, error) {
 	return c.requestJSONTimeout(ctx, 10*time.Second, method, path, body)
 }

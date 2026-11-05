@@ -29,12 +29,14 @@ var proxyPrefixes = []string{"/api/", "/_minilake/"}
 type Options struct {
 	Host string // bind host, accepted in the Host header alongside loopback names
 	// Extra names accepted in the Host header, such as the machine's addresses when shared.
-	AllowedHosts []string
-	Lake         *lake.Client
-	Context      any    // describes the managed context, if any
-	DataRoot     string // MiniLake's data directory as SQL sees it; empty when not managed
-	Static       fs.FS
-	Version      string
+	AllowedHosts  []string
+	Lake          *lake.Client
+	Context       any    // describes the managed context, if any
+	DataRoot      string // MiniLake's data directory as SQL sees it; empty when not managed
+	Static        fs.FS
+	Version       string
+	Runtime       any
+	RuntimeHealth func(context.Context) error
 	// Peers lists the contexts the UI can switch to, this one included. Nil means none.
 	Peers     func() []Peer
 	Lifecycle context.Context // stops active MCP sessions when the server shuts down
@@ -53,7 +55,7 @@ type Peer struct {
 
 // peerPrefixes are the paths /ctx/<id>/ passes on to another context's pond: its lake
 // and its config, but not its MCP endpoint, which belongs to that context's agents.
-var peerPrefixes = []string{"/api/", "/_minilake/", "/pond/config"}
+var peerPrefixes = []string{"/api/", "/_minilake/", "/pond/config", "/pond/health"}
 
 type handler struct {
 	Options
@@ -162,6 +164,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.graphHTTP(w, r)
 	case p == "/pond/config" && r.Method == http.MethodGet:
 		h.config(w, r)
+	case p == "/pond/health" && r.Method == http.MethodGet:
+		h.health(w, r)
 	case r.Method == http.MethodGet || r.Method == http.MethodHead:
 		h.static(w, p)
 	default:
@@ -272,16 +276,22 @@ func (h *handler) peer(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) config(w http.ResponseWriter, r *http.Request) {
 	out := struct {
-		MinilakeURL string  `json:"minilake_url"`
-		Context     any     `json:"context"`
-		WarehouseID *string `json:"warehouse_id"`
-		MCP         *bool   `json:"mcp"`
-		MinilakeMCP bool    `json:"minilake_mcp"`
-		Error       *string `json:"error"`
-		Version     string  `json:"version"`
-		DataRoot    *string `json:"data_root"`
-		Home        string  `json:"home,omitempty"` // shortens paths to ~ in the UI
-	}{MinilakeURL: h.Lake.URL(), Context: h.Context, Version: h.Version}
+		MinilakeURL  string            `json:"minilake_url"`
+		Context      any               `json:"context"`
+		WarehouseID  *string           `json:"warehouse_id"`
+		MCP          *bool             `json:"mcp"`
+		MinilakeMCP  bool              `json:"minilake_mcp"`
+		Error        *string           `json:"error"`
+		Version      string            `json:"version"`
+		DataRoot     *string           `json:"data_root"`
+		Home         string            `json:"home,omitempty"` // shortens paths to ~ in the UI
+		Runtime      any               `json:"runtime"`
+		Capabilities map[string]string `json:"capabilities"`
+	}{MinilakeURL: h.Lake.URL(), Context: h.Context, Version: h.Version, Runtime: h.Runtime,
+		Capabilities: map[string]string{"sql": "configured", "files": "configured", "graphs": "configured", "jobs": "external service controls execution", "mcp": "configured"}}
+	if h.RuntimeHealth != nil {
+		out.Capabilities["jobs"] = "engine API checked at startup"
+	}
 	out.Home, _ = os.UserHomeDir()
 	available := true
 	out.MCP = &available
@@ -294,6 +304,23 @@ func (h *handler) config(w http.ResponseWriter, r *http.Request) {
 		out.Error = &msg
 	} else {
 		out.WarehouseID = &id
+	}
+	sendJSON(w, http.StatusOK, out)
+}
+
+func (h *handler) health(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{"pond": "responding", "lake": "responding"}
+	if err := h.Lake.Health(r.Context()); err != nil {
+		out["lake"] = "unavailable"
+		out["error"] = "MiniLake is not responding. Check its logs and service state."
+		if h.RuntimeHealth != nil {
+			if err := h.RuntimeHealth(r.Context()); err != nil {
+				out["engine"] = "unavailable"
+				out["error"] = "Container engine is not responding. Check its service/VM and socket permissions; run pond doctor."
+			} else {
+				out["engine"] = "responding"
+			}
+		}
 	}
 	sendJSON(w, http.StatusOK, out)
 }

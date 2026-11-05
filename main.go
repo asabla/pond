@@ -47,6 +47,7 @@ Usage:
   pond reset [DIR] [--yes]  delete the context's lake data, then seed it again
   pond export [DIR] [-o FILE]       write the lake's data to a .tar.gz snapshot
   pond import FILE [DIR] [--yes]    replace the lake's data with a snapshot
+  pond doctor [DIR] [flags]        check the stored runtime or an external MiniLake
   pond graph COMMAND [flags]       analyse graphs in a running context (graph --help for commands)
   pond version              print the version
 
@@ -56,7 +57,14 @@ Flags for up:
   --image IMAGE  MiniLake image (default: ghcr.io/dmux/minilake:1.9.1, env POND_MINILAKE_IMAGE)
   --minilake URL use an already running MiniLake at this URL instead of starting a container
                  (env MINILAKE_URL)
+  --runtime NAME select docker, colima, orbstack, rancher-desktop or podman (env POND_RUNTIME)
+  --connection NAME  use an existing Docker context or Podman connection (env POND_CONNECTION)
+  --runtime-socket PATH  engine-side API socket to mount into MiniLake (env POND_RUNTIME_SOCKET)
+  --migrate-runtime  back up stopped data before changing its runtime connection or image
   --open         open the UI in a browser
+
+doctor accepts --runtime, --connection, --runtime-socket or --minilake.
+It checks the connection without creating containers or changing CLI defaults.
 
 Flags for logs:
   -f, --follow   keep printing new log lines
@@ -70,23 +78,28 @@ the context stopped (pond down).
 )
 
 type args struct {
-	command      string
-	dir          string
-	port         int
-	portExplicit bool
-	host         string
-	image        string
-	minilake     string
-	open         bool
-	follow       bool
-	tail         string
-	yes          bool
-	output       string
-	file         string
-	graph        *graphArgs
+	command        string
+	dir            string
+	port           int
+	portExplicit   bool
+	host           string
+	image          string
+	imageExplicit  bool
+	minilake       string
+	open           bool
+	follow         bool
+	tail           string
+	yes            bool
+	output         string
+	file           string
+	graph          *graphArgs
+	runtime        string
+	connection     string
+	socket         string
+	migrateRuntime bool
 }
 
-var commands = []string{"up", "ls", "down", "open", "logs", "seed", "reset", "export", "import", "version", "graph"}
+var commands = []string{"up", "ls", "down", "open", "logs", "seed", "reset", "export", "import", "version", "graph", "doctor"}
 
 var errHelp = errors.New("help requested")
 
@@ -110,7 +123,7 @@ func main() {
 	case "up":
 		err = up(a)
 	case "ls":
-		err = ls()
+		ls()
 	case "down":
 		err = down(a)
 	case "open":
@@ -125,6 +138,8 @@ func main() {
 		err = export(a)
 	case "import":
 		err = importSnapshot(a)
+	case "doctor":
+		err = doctor(a)
 	case "version":
 		fmt.Println("pond", version)
 	case "graph":
@@ -152,8 +167,16 @@ func parse(argv []string) (*args, error) {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 	var port *int
+	if a.command == "up" || a.command == "doctor" {
+		fs.StringVar(&a.runtime, "runtime", os.Getenv("POND_RUNTIME"), "")
+		fs.StringVar(&a.connection, "connection", os.Getenv("POND_CONNECTION"), "")
+		fs.StringVar(&a.socket, "runtime-socket", os.Getenv("POND_RUNTIME_SOCKET"), "")
+	}
 	switch a.command {
+	case "doctor":
+		fs.StringVar(&a.minilake, "minilake", os.Getenv("MINILAKE_URL"), "")
 	case "up":
+		fs.BoolVar(&a.migrateRuntime, "migrate-runtime", false, "")
 		port = fs.Int("port", 0, "")
 		fs.StringVar(&a.host, "host", envOr("POND_HOST", "127.0.0.1"), "")
 		fs.StringVar(&a.image, "image", pondctx.DefaultImage(), "")
@@ -207,6 +230,7 @@ func parse(argv []string) (*args, error) {
 		a.dir = positional[0]
 	}
 	if a.command == "up" {
+		a.imageExplicit = flagSet(fs, "image") || os.Getenv("POND_MINILAKE_IMAGE") != ""
 		envPort := os.Getenv("POND_PORT")
 		a.portExplicit = flagSet(fs, "port") || envPort != ""
 		a.port = *port
@@ -223,6 +247,12 @@ func parse(argv []string) (*args, error) {
 				a.port = p
 			}
 		}
+	}
+	if a.minilake != "" && (flagSet(fs, "runtime") || flagSet(fs, "connection") || flagSet(fs, "runtime-socket") || a.migrateRuntime) {
+		return nil, errors.New("--minilake attaches to an external service and cannot be combined with managed runtime options")
+	}
+	if a.minilake != "" {
+		a.runtime, a.connection, a.socket = "", "", ""
 	}
 	return a, nil
 }
@@ -292,7 +322,7 @@ func machineNames() []string {
 	return names
 }
 
-func up(a *args) error {
+func up(a *args) (result error) {
 	var c *pondctx.Context
 	fresh := false
 	if a.minilake == "" {
@@ -316,7 +346,20 @@ func up(a *args) error {
 		defer lock.Release()
 		// A container left by a killed pond writes its state back when stopped, so
 		// stop it before judging whether the lake is fresh.
-		stopLeftover(*c)
+		if c.Runtime == nil {
+			selection, connection, socket := a.runtime, a.connection, a.socket
+			if _, err := os.Stat(c.DataPath()); err == nil {
+				selection, connection, socket = "", "", ""
+			}
+			resolved, err := pondctx.ResolveRuntime(context.Background(), selection, connection, socket)
+			if err != nil {
+				return err
+			}
+			c.Runtime = resolved
+		}
+		if err := stopLeftover(*c); err != nil {
+			return err
+		}
 		fresh = pondctx.Fresh(*c)
 		if err := pondctx.WriteRunFile(*c, pondctx.RunInfo{PID: os.Getpid()}); err != nil {
 			return err
@@ -326,14 +369,20 @@ func up(a *args) error {
 	// SIGTERM (`pond down`) and SIGHUP (a closed terminal) clean up the same way Ctrl-C does.
 	sig, stopSignals := signal.NotifyContext(context.Background(), stopSignals...)
 	var srv *http.Server
+	started := false
 	defer func() {
 		stopSignals() // a second Ctrl-C during cleanup kills pond
 		if srv != nil {
 			srv.Close()
 		}
 		if c != nil {
-			logf("\nStopping MiniLake…")
-			pondctx.Stop(*c)
+			if started {
+				logf("\nStopping MiniLake…")
+				if err := pondctx.Stop(*c); err != nil {
+					logf("! Cleanup incomplete: %v", err)
+					result = errors.Join(result, err)
+				}
+			}
 			os.Remove(c.RunFile())
 		}
 	}()
@@ -343,8 +392,16 @@ func up(a *args) error {
 	dataRoot := ""
 	if c != nil {
 		logf("pond · %s  (%s)", c.Name(), c.Dir)
+		if c.Runtime != nil && !a.imageExplicit && c.Runtime.Image != "" {
+			a.image = c.Runtime.Image
+		}
+		if err := c.ConfigureRuntime(sig, a.runtime, a.connection, a.socket, a.image, a.migrateRuntime); err != nil {
+			return err
+		}
+		logf("Runtime: %s (%s), connection %s", c.Runtime.Provider, c.Runtime.Kind, c.Runtime.Connection)
 		logf("Starting MiniLake…")
 		var err error
+		started = true
 		if url, err = pondctx.Start(sig, *c, a.image, func(s string) { logf("%s", s) }); err != nil {
 			if sig.Err() != nil {
 				return nil
@@ -388,9 +445,21 @@ func up(a *args) error {
 	if shared {
 		allowedHosts = machineNames()
 	}
+	var runtimeInfo any = map[string]string{"kind": "external", "provider": "External MiniLake"}
+	var runtimeHealth func(context.Context) error
+	if c != nil && c.Runtime != nil {
+		runtimeInfo = c.Runtime
+		pinned := *c.Runtime
+		runtimeHealth = func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			probe := pinned
+			return probe.Probe(ctx)
+		}
+	}
 	srv = &http.Server{Handler: server.New(server.Options{
 		Host: a.host, AllowedHosts: allowedHosts, Lake: client, Context: ctxInfo, DataRoot: dataRoot,
-		Static: static, Version: version, Peers: peers(c),
+		Static: static, Version: version, Peers: peers(c), Runtime: runtimeInfo, RuntimeHealth: runtimeHealth,
 		Lifecycle: sig,
 	}),
 		// Bounds only the request headers; bodies and MCP streams can take as long as they need.
@@ -527,14 +596,16 @@ func openBrowser(url string) {
 	}
 }
 
-func ls() error {
-	running, err := pondctx.List()
-	if err != nil {
-		return err
+func ls() {
+	var running []pondctx.Known
+	for _, c := range pondctx.KnownContexts() {
+		if c.Running {
+			running = append(running, c)
+		}
 	}
 	if len(running) == 0 {
 		logf("No running pond contexts.")
-		return nil
+		return
 	}
 	rows := [][]string{{"NAME", "UI", "DIR", "STATUS"}}
 	for _, r := range running {
@@ -557,7 +628,6 @@ func ls() error {
 		}
 		fmt.Println(strings.Join(cells, "  "), r[3])
 	}
-	return nil
 }
 
 // serving returns the running pond for DIR, or an error saying how to start it.
@@ -588,14 +658,18 @@ func openContext(a *args) error {
 
 func logs(a *args) error {
 	c := pondctx.ForDir(a.dir)
-	if !pondctx.Exists(c) {
+	exists, err := pondctx.CheckExists(c)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return fmt.Errorf("%s has no MiniLake container. Start it with `%s`", c.Name(), startCommand(a.dir))
 	}
 	cmd := pondctx.LogsCommand(context.Background(), c, a.follow, a.tail)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	// Ctrl-C reaches docker directly and ends `logs -f`; pond just waits for it.
 	signal.Ignore(os.Interrupt)
-	err := cmd.Run()
+	err = cmd.Run()
 	if cmd.ProcessState != nil && !cmd.ProcessState.Exited() {
 		return nil // stopped by Ctrl-C
 	}
@@ -676,7 +750,9 @@ func reset(a *args) error {
 			return err
 		}
 		defer lock.Release()
-		stopLeftover(c)
+		if err := stopLeftover(c); err != nil {
+			return err
+		}
 		if err := pondctx.ClearData(c); err != nil {
 			return err
 		}
@@ -710,18 +786,35 @@ func lockStopped(c pondctx.Context, dir string) (*pondctx.Lock, error) {
 		return nil, fmt.Errorf("%s is running. Stop it first with `pond down%s`", c.Name(), strings.TrimPrefix(startCommand(dir), "pond"))
 	}
 	if err == nil {
-		stopLeftover(c)
+		if stopErr := stopLeftover(c); stopErr != nil {
+			lock.Release()
+			return nil, stopErr
+		}
 	}
 	return lock, err
 }
 
 // stopLeftover stops a container left by a pond that was killed, so it can't write its
 // state over the data an offline command is about to change.
-func stopLeftover(c pondctx.Context) {
-	if pondctx.Exists(c) {
-		logf("Stopping a MiniLake container left behind by an earlier pond…")
-		pondctx.Stop(c)
+func stopLeftover(c pondctx.Context) error {
+	if _, err := os.Stat(c.StateDir() + "/stopped"); err == nil {
+		return nil
 	}
+	if c.Runtime == nil {
+		r, err := pondctx.ResolveRuntime(context.Background(), "", "", "")
+		if err != nil {
+			return err
+		}
+		c.Runtime = r
+	}
+	exists, err := pondctx.CheckExists(c)
+	if err != nil {
+		return err
+	}
+	if exists {
+		logf("Stopping a MiniLake container left behind by an earlier pond…")
+	}
+	return pondctx.Stop(c)
 }
 
 func export(a *args) error {
@@ -735,7 +828,7 @@ func export(a *args) error {
 	if out == "" {
 		out = fmt.Sprintf("%s-%s.pond.tar.gz", c.Name(), time.Now().Format("20060102-150405"))
 	}
-	f, err := os.OpenFile(out, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(out, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -807,18 +900,16 @@ func down(a *args) error {
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
+		if err := pondctx.Stop(c); err != nil {
+			return fmt.Errorf("context stopped, but cleanup is incomplete: %w", err)
+		}
 		logf("Stopped %s.", c.Name())
 		return nil
 	}
 	os.Remove(c.RunFile())
-	if !pondctx.Exists(c) {
-		logf("%s is not running.", c.Name())
-		return nil
+	if err := stopLeftover(c); err != nil {
+		return err
 	}
-	pondctx.Stop(c)
-	if pondctx.Exists(c) {
-		return fmt.Errorf("couldn't remove the containers of %s; see `docker ps -a`", c.Name())
-	}
-	logf("Removed leftover containers for %s. Data in %s is kept.", c.Name(), c.StateDir())
+	logf("Stopped %s. Data in %s is kept.", c.Name(), c.StateDir())
 	return nil
 }

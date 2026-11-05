@@ -141,3 +141,19 @@ func TestDataCommands(t *testing.T) {
 		t.Error("import without a file accepted")
 	}
 }
+
+func TestRuntimeFlagsAndExternalMode(t *testing.T) {
+	t.Setenv("MINILAKE_URL", "")
+	a, err := parse([]string{"up", "project", "--runtime", "podman", "--connection", "machine", "--runtime-socket", "/run/podman.sock", "--migrate-runtime"})
+	if err != nil || a.runtime != "podman" || a.connection != "machine" || a.socket != "/run/podman.sock" || !a.migrateRuntime {
+		t.Fatalf("runtime flags: %+v %v", a, err)
+	}
+	if _, err := parse([]string{"--minilake", "http://localhost:8000", "--runtime", "podman"}); err == nil {
+		t.Fatal("ignored explicit runtime options in external mode")
+	}
+	t.Setenv("POND_RUNTIME", "podman")
+	a, err = parse([]string{"doctor", "--minilake", "http://localhost:8000"})
+	if err != nil || a.runtime != "" {
+		t.Fatalf("external mode must not require the default local runtime: %+v %v", a, err)
+	}
+}

@@ -32,9 +32,38 @@ func fakeDocker(args []string) int {
 		fmt.Fprintln(f, string(line))
 		f.Close()
 	}
+	if len(args) > 2 && (args[0] == "--host" || args[0] == "--url") {
+		args = args[2:]
+		if len(args) > 2 && args[0] == "--identity" {
+			args = args[2:]
+		}
+	}
 	switch {
+	case args[0] == "context" && args[1] == "show":
+		fmt.Println("colima")
+	case args[0] == "context" && args[1] == "inspect":
+		fmt.Println("unix:///tmp/fake-engine.sock")
+	case args[0] == "system" && args[1] == "connection":
+		fmt.Println(`[{"Name":"podman-machine-default","URI":"ssh://core@127.0.0.1:5555/run/user/1000/podman/podman.sock","Identity":"/tmp/podman-key","Default":true}]`)
+	case (args[0] == "inspect" || (len(args) > 1 && args[1] == "inspect")) && os.Getenv("FAKE_SOCKET_MISSING") != "":
+		fmt.Fprintln(os.Stderr, "Cannot connect to engine socket: no such file or directory")
+		return 1
+	case (args[0] == "inspect" || (len(args) > 1 && args[1] == "inspect")) && os.Getenv("FAKE_NO_RESOURCES") != "":
+		fmt.Fprintln(os.Stderr, "No such container or network")
+		return 1
+	case slices.ContainsFunc(args, func(a string) bool { return strings.Contains(a, ".Labels") }) || slices.ContainsFunc(args, func(a string) bool { return strings.Contains(a, ".Config.Labels") }):
+		label := os.Getenv("FAKE_CONTEXT_ID")
+		if os.Getenv("FAKE_WRONG_OWNER") != "" {
+			label = "some-other-context"
+		}
+		fmt.Println(label)
+	case args[0] == "stop" && os.Getenv("FAKE_STOP_FAIL") != "":
+		fmt.Fprintln(os.Stderr, "cannot stop container")
+		return 1
 	case args[0] == "info" && os.Getenv("FAKE_DOCKER_DOWN") != "":
 		return 1
+	case args[0] == "info":
+		fmt.Println(`{"ServerVersion":"29.test","version":{"Version":"5.test"}}`)
 	case args[0] == "network" && args[1] == "inspect":
 		fmt.Println(os.Getenv("FAKE_ATTACHED"))
 	case args[0] == "image" && args[1] == "ls":
@@ -89,7 +118,9 @@ func setup(t *testing.T) *fixture {
 	if err := os.Mkdir(project, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return &fixture{t, log, ForDir(project)}
+	c := ForDir(project)
+	t.Setenv("FAKE_CONTEXT_ID", c.ID())
+	return &fixture{t, log, c}
 }
 
 func (f *fixture) calls() [][]string {
@@ -150,10 +181,14 @@ func TestStateDirIgnoresItself(t *testing.T) {
 func TestStopRemovesEverythingOnTheContextNetwork(t *testing.T) {
 	f := setup(t)
 	t.Setenv("FAKE_ATTACHED", "job-a job-b ")
-	Stop(f.ctx)
+	if err := Stop(f.ctx); err != nil {
+		t.Fatal(err)
+	}
 	calls := f.calls()
-	if calls[0][0] != "stop" {
-		t.Errorf("graceful stop must come first, got %v", calls[0])
+	stopAt := slices.IndexFunc(calls, func(c []string) bool { return c[0] == "stop" })
+	removeAt := slices.IndexFunc(calls, func(c []string) bool { return c[0] == "rm" })
+	if stopAt < 0 || removeAt <= stopAt {
+		t.Fatalf("graceful stop must precede removal: %v", calls)
 	}
 	i := slices.IndexFunc(calls, func(c []string) bool { return len(c) > 1 && c[0] == "rm" && c[1] == "-f" })
 	if i < 0 {
@@ -195,7 +230,7 @@ func TestStartScopesContainerToContext(t *testing.T) {
 	}
 	for _, want := range []string{
 		"type=bind,source=" + data + ",target=/data", "MINILAKE_DOCKER_NETWORK=" + f.ctx.Network(),
-		"pond.context=" + f.ctx.ID(), "127.0.0.1::8000", "pond.dir=" + f.ctx.Dir,
+		"pond.context=" + f.ctx.ID(), "pond.dir=" + f.ctx.Dir,
 	} {
 		if !slices.Contains(run, want) {
 			t.Errorf("run missing %q: %v", want, run)
@@ -203,6 +238,9 @@ func TestStartScopesContainerToContext(t *testing.T) {
 	}
 	if i := slices.Index(run, "--network"); i < 0 || run[i+1] != f.ctx.Network() {
 		t.Errorf("run network: %v", run)
+	}
+	if i := slices.Index(run, "-p"); i < 0 || !strings.HasPrefix(run[i+1], "127.0.0.1:") || strings.Contains(run[i+1], "::") || !strings.HasSuffix(run[i+1], ":8000") {
+		t.Errorf("MiniLake's port must stay fixed across container restarts: %v", run)
 	}
 	if _, err := os.Stat(filepath.Join(data, ".pond-mount")); !os.IsNotExist(err) {
 		t.Error("mount marker left behind")
@@ -214,7 +252,7 @@ func TestStartRefusesPathsDockerCannotSee(t *testing.T) {
 	t.Setenv("FAKE_PORT", "1")
 	// No FAKE_MOUNT: the container sees an empty directory, as with an unshared path.
 	_, err := Start(context.Background(), f.ctx, "img:1", func(string) {})
-	if err == nil || !strings.Contains(err.Error(), "Docker cannot see") {
+	if err == nil || !strings.Contains(err.Error(), "cannot see") {
 		t.Errorf("err = %v", err)
 	}
 }

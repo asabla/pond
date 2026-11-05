@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -52,15 +53,18 @@ func DefaultImage() string {
 
 // Context is a directory with its own lake: state in .pond/, plus its own container and network.
 type Context struct {
-	Dir string
+	Dir        string
+	Runtime    *Runtime
+	runtimeErr error
 }
 
 // Description is what the UI learns about the context through /pond/config.
 type Description struct {
-	Name      string `json:"name"`
-	ID        string `json:"id"`
-	Dir       string `json:"dir"`
-	Container string `json:"container"`
+	Name      string   `json:"name"`
+	ID        string   `json:"id"`
+	Dir       string   `json:"dir"`
+	Container string   `json:"container"`
+	Runtime   *Runtime `json:"runtime,omitempty"`
 }
 
 // ForDir returns the context for path, made absolute with ~ expanded and symlinks resolved.
@@ -77,7 +81,9 @@ func ForDir(path string) Context {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
-	return Context{Dir: abs}
+	c := Context{Dir: abs}
+	loadRuntime(&c)
+	return c
 }
 
 var unsafeName = regexp.MustCompile(`[^a-z0-9_.-]+`)
@@ -130,7 +136,7 @@ func (c Context) PreferredPort() int {
 
 // Describe returns what the UI shows about the context.
 func (c Context) Describe() *Description {
-	return &Description{Name: c.Name(), ID: c.ID(), Dir: c.Dir, Container: c.Container()}
+	return &Description{Name: c.Name(), ID: c.ID(), Dir: c.Dir, Container: c.Container(), Runtime: c.Runtime}
 }
 
 func docker(ctx context.Context, check bool, args ...string) (string, error) {
@@ -154,7 +160,7 @@ func docker(ctx context.Context, check bool, args ...string) (string, error) {
 		if detail == "" {
 			detail = out
 		}
-		return "", fmt.Errorf("docker %s failed: %s", strings.Join(args[:min(2, len(args))], " "), detail)
+		return "", fmt.Errorf("docker %s failed: %s: %w", strings.Join(args[:min(2, len(args))], " "), detail, err)
 	}
 	return out, nil
 }
@@ -294,43 +300,68 @@ func PrepareStateDir(c Context) error {
 
 // Start runs MiniLake for c and returns its base URL on the host.
 func Start(ctx context.Context, c Context, image string, onStatus func(string)) (string, error) {
-	if err := EnsureDocker(ctx); err != nil {
+	if c.Runtime != nil {
+		if err := c.Runtime.Probe(ctx); err != nil {
+			return "", err
+		}
+	} else if err := EnsureDocker(ctx); err != nil {
 		return "", err
 	}
-	Stop(c) //nolint:contextcheck // clear leftovers; Stop ignores cancellation on purpose
+	if err := Stop(c); err != nil { //nolint:contextcheck // cleanup must finish even when startup was cancelled
+		return "", err
+	}
 	if err := PrepareStateDir(c); err != nil {
 		return "", err
 	}
 
-	if out, err := docker(ctx, true, "image", "ls", "-q", image); err != nil {
+	if out, err := c.command(ctx, true, "image", "ls", "-q", image); err != nil {
 		return "", err
 	} else if out == "" {
 		onStatus(fmt.Sprintf("Pulling %s (first run only)…", image))
-		if _, err := docker(ctx, true, "pull", "-q", image); err != nil {
+		if _, err := c.command(ctx, true, "pull", "-q", image); err != nil {
 			return "", err
 		}
 	}
 
 	labels := []string{"--label", Label + "=" + c.ID(), "--label", LabelDir + "=" + c.Dir}
-	if _, err := docker(ctx, true, append([]string{"network", "create"}, append(labels, c.Network())...)...); err != nil {
+	// An explicit host port survives an engine-driven restart of this container.
+	// Docker's empty HostPort allocates a new port on each container start.
+	listener, err := new(net.ListenConfig).Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		listener.Close()
+		return "", errors.New("cannot allocate a local MiniLake port")
+	}
+	hostPort := address.Port
+	if err := listener.Close(); err != nil {
+		return "", err
+	}
+	os.Remove(filepath.Join(c.StateDir(), "stopped"))
+	if _, err := c.command(ctx, true, append([]string{"network", "create"}, append(labels, c.Network())...)...); err != nil {
 		return "", err
 	}
 	run := []string{"run", "-d", "--name", c.Container(), "--network", c.Network()}
 	run = append(run, labels...)
 	run = append(run,
-		"-p", fmt.Sprintf("127.0.0.1::%d", minilakePort),
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, minilakePort),
 		"--mount", bindMount(c.DataPath(), DataDir),
 		// MiniLake starts Spark job containers as siblings through the host's Docker.
-		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"--mount", bindMount(c.socketPath(), "/var/run/docker.sock"),
 		"-e", "MINILAKE_MCP=1",
 		"-e", "MINILAKE_PERSIST=1",
 		"-e", "MINILAKE_DOCKER_NETWORK="+c.Network(),
 		"-e", "MINILAKE_NOTEBOOK=0",
 		image,
 	)
-	if _, err := docker(ctx, true, run...); err != nil {
+	if _, err := c.command(ctx, true, run...); err != nil {
 		// Docker Desktop refuses outright to mount a path it doesn't share.
 		if msg := err.Error(); strings.Contains(msg, "bind source path does not exist") || strings.Contains(msg, "mounts denied") {
+			if strings.Contains(msg, c.socketPath()) {
+				return "", fmt.Errorf("engine socket %s cannot be mounted: %w. Set --runtime-socket to the engine-side path, not the host-forwarded path", c.socketPath(), err)
+			}
 			return "", mountError(c)
 		}
 		return "", err
@@ -338,7 +369,12 @@ func Start(ctx context.Context, c Context, image string, onStatus func(string)) 
 	if err := checkMount(ctx, c); err != nil {
 		return "", err
 	}
-	out, err := docker(ctx, true, "port", c.Container(), fmt.Sprintf("%d/tcp", minilakePort))
+	if c.Runtime != nil {
+		if _, err := c.command(ctx, true, "exec", c.Container(), "python", "-c", `import docker; c = docker.from_env(); c.ping()`); err != nil {
+			return "", fmt.Errorf("MiniLake cannot access the engine API through %s: %w. Check socket permissions and any host security policy; run pond doctor", c.socketPath(), err)
+		}
+	}
+	out, err := c.command(ctx, true, "port", c.Container(), fmt.Sprintf("%d/tcp", minilakePort))
 	if err != nil {
 		return "", err
 	}
@@ -361,7 +397,7 @@ func checkMount(ctx context.Context, c Context) error {
 	if err := os.WriteFile(marker, []byte(c.ID()), 0o644); err != nil {
 		return err
 	}
-	seen, err := docker(ctx, true, "exec", c.Container(), "cat", DataDir+"/.pond-mount")
+	seen, err := c.command(ctx, true, "exec", c.Container(), "cat", DataDir+"/.pond-mount")
 	os.Remove(marker)
 	if err != nil {
 		// A container that crashed on start can't run cat either; say that, with its logs,
@@ -378,7 +414,7 @@ func checkMount(ctx context.Context, c Context) error {
 }
 
 func mountError(c Context) error {
-	return fmt.Errorf("Docker cannot see %s, so data would not land in %s.\n"+
+	return fmt.Errorf("Docker-compatible runtime cannot see %s, so data would not land in %s.\n"+
 		"Share this path with your Docker VM (colima and Docker Desktop share your home "+
 		"directory by default), or run pond from a directory under it.", c.Dir, c.StateDir())
 }
@@ -386,8 +422,8 @@ func mountError(c Context) error {
 // exitedError reports, with its last log lines, a MiniLake container that stopped.
 func exitedError(ctx context.Context, c Context) error {
 	// Only a definite "false" is a crash; a failed inspect may just be docker hiccuping.
-	if running, err := docker(ctx, true, "inspect", "-f", "{{.State.Running}}", c.Container()); err == nil && running == "false" {
-		logs, _ := docker(ctx, false, "logs", "--tail", "30", c.Container())
+	if running, err := c.command(ctx, true, "inspect", "-f", "{{.State.Running}}", c.Container()); err == nil && running == "false" {
+		logs, _ := c.command(ctx, false, "logs", "--tail", "30", c.Container())
 		return fmt.Errorf("MiniLake container exited during startup:\n%s", logs)
 	}
 	return nil
@@ -416,29 +452,111 @@ func waitHealthy(ctx context.Context, c Context, url string, timeout time.Durati
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("MiniLake did not become healthy within %ds. See `docker logs %s`.", int(timeout.Seconds()), c.Container())
+	return fmt.Errorf("MiniLake did not become healthy within %ds. See `pond logs %q`.", int(timeout.Seconds()), c.Dir)
 }
 
 // Stop removes the context's containers and network. Data in `.pond/` is kept.
 // It ignores cancellation so cleanup after Ctrl-C still completes.
-func Stop(c Context) {
-	bg := context.Background()
-	// Graceful stop first so MINILAKE_PERSIST writes its snapshot.
-	_, _ = docker(bg, false, "stop", "-t", strconv.Itoa(stopTimeout), c.Container())
-	attached, _ := docker(bg, false, "network", "inspect", "-f", "{{range .Containers}}{{.Name}} {{end}}", c.Network())
-	rm := []string{"rm", "-f", c.Container()}
+func Stop(c Context) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	container, err := c.owned(ctx, "container", c.Container())
+	if err != nil {
+		return err
+	}
+	network, err := c.owned(ctx, "network", c.Network())
+	if err != nil {
+		return err
+	}
+	attached := ""
+	if network {
+		attached, err = c.command(ctx, true, "network", "inspect", "-f", "{{range .Containers}}{{.Name}} {{end}}", c.Network())
+		if err != nil {
+			return err
+		}
+	}
+	// A failed graceful stop must never be followed by forced removal of lake data.
+	if container {
+		if _, err := c.command(ctx, true, "stop", "-t", strconv.Itoa(stopTimeout), c.Container()); err != nil {
+			return err
+		}
+	}
+	rm := []string{"rm", "-f"}
+	if container {
+		rm = append(rm, c.Container())
+	}
 	for name := range strings.FieldsSeq(attached) {
 		if name != c.Container() {
 			rm = append(rm, name)
 		}
 	}
-	_, _ = docker(bg, false, rm...)
-	_, _ = docker(bg, false, "network", "rm", c.Network())
+	if len(rm) > 2 {
+		if _, err := c.command(ctx, true, rm...); err != nil {
+			return err
+		}
+	}
+	if network {
+		if _, err := c.command(ctx, true, "network", "rm", c.Network()); err != nil {
+			return err
+		}
+	}
+	if _, err := os.Stat(c.StateDir()); err == nil {
+		return os.WriteFile(filepath.Join(c.StateDir(), "stopped"), []byte("clean shutdown\n"), 0o644)
+	}
+	return nil
+}
+
+func (c Context) socketPath() string {
+	if c.Runtime != nil {
+		return c.Runtime.Socket
+	}
+	return "/var/run/docker.sock"
+}
+
+func (c Context) owned(ctx context.Context, kind, name string) (bool, error) {
+	field := `{{index .Config.Labels "pond.context"}}`
+	if kind == "network" {
+		field = `{{index .Labels "pond.context"}}`
+	}
+	label, err := c.command(ctx, true, kind, "inspect", "-f", field, name)
+	if missingResource(err, kind, name) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if label != c.ID() {
+		return false, fmt.Errorf("refusing to remove %s %s: context ownership label does not match", kind, name)
+	}
+	return true, nil
+}
+
+func missingResource(err error, kind, name string) bool {
+	if err == nil {
+		return false
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return (strings.Contains(message, "no such container") || strings.Contains(message, "no such object") || strings.Contains(message, "no such network")) || (kind == "network" && (strings.Contains(message, "network "+strings.ToLower(name)+" not found") || strings.Contains(message, "network not found")))
+}
+
+// CheckExists distinguishes an absent container from an unavailable engine.
+func CheckExists(c Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := c.command(ctx, true, "inspect", "-f", "{{.Id}}", c.Container())
+	if missingResource(err, "container", c.Container()) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Exists reports whether the context's MiniLake container exists, running or not.
 func Exists(c Context) bool {
-	_, err := docker(context.Background(), true, "inspect", "-f", "{{.Id}}", c.Container())
+	_, err := c.command(context.Background(), true, "inspect", "-f", "{{.Id}}", c.Container())
 	return err == nil
 }
 
@@ -448,7 +566,13 @@ func LogsCommand(ctx context.Context, c Context, follow bool, tail string) *exec
 	if follow {
 		args = append(args, "--follow")
 	}
-	return exec.CommandContext(ctx, "docker", append(args, c.Container())...)
+	args = append(args, c.Container())
+	if c.Runtime != nil {
+		cmd := exec.CommandContext(ctx, c.Runtime.Kind, c.Runtime.args(args...)...)
+		cmd.Env = runtimeEnv()
+		return cmd
+	}
+	return exec.CommandContext(ctx, "docker", args...)
 }
 
 // Running is one running context, as `pond ls` shows it.
@@ -461,7 +585,9 @@ func List() ([]Running, error) {
 	// Ask for the label by name: the Labels column joins them with commas, which a
 	// directory name can contain too.
 	format := fmt.Sprintf(`{"Dir":{{json (.Label %q)}},"Status":{{json .Status}}}`, LabelDir)
-	out, err := docker(context.Background(), false, "ps", "--filter", "label="+Label, "--format", format)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := docker(ctx, false, "ps", "--filter", "label="+Label, "--format", format)
 	if err != nil {
 		return nil, err
 	}

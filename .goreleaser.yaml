@@ -55,8 +55,9 @@ homebrew_casks:
         - "~/.config/pond/recent.json"
     commit_msg_template: "chore: release pond {{ .Tag }}"
     caveats: |
-      pond runs MiniLake in a container, so it needs a running Docker
-      (Docker Desktop, OrbStack or colima).
+      pond manages MiniLake with Docker-compatible providers or Podman.
+      Select a provider with --runtime; use pond doctor to check its connection.
+      Use --minilake URL for an existing service without a local container CLI.
       Copy the examples into a writable directory before starting them:
         cp -R "$(brew --caskroom pond)/{{ .Version }}/examples" ./pond-examples
         pond ./pond-examples/social
