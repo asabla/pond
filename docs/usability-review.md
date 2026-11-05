@@ -56,6 +56,25 @@ which is ignored by Git. Screenshots include `runtime-settings.png`,
 stopped and removed. Only the three implementation-review entries were removed
 from the recent-context list; the two existing entries were kept.
 
+### Follow-up: removing stopped contexts
+
+The first usability pass missed removal of a stopped context from discovery.
+The `v0.2.1` follow-up adds `pond ls --all`, `pond forget DIR`, and **Remove from
+list** in an expanded stopped context, including context-filter results.
+These operations keep lake data, open tabs and browser drafts. Starting the
+context again adds it back. Running/starting contexts are refused.
+
+Registry updates use a shared file lock and atomic replacement. Tests cover
+concurrent additions/removal, refusal while a startup lock is held, missing
+project directories, corrupt registry data, cache refresh, no container CLI,
+cross-origin rejection and API error handling.
+
+Built-in Browser checks with two isolated live contexts passed removal, retained
+SQL after reload, closed-tab recovery after removal, and reappearance after
+restart. CLI removal without a container CLI kept all nine project state/data
+files byte for byte. Test contexts use a separate recent-context registry;
+evidence is in the ignored `dist/forget-review/evidence/` directory.
+
 ### Remaining qualification work
 
 The implementation does not establish WCAG conformance. VoiceOver/NVDA,

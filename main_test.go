@@ -63,6 +63,22 @@ func TestSubcommands(t *testing.T) {
 	}
 }
 
+func TestForgetAndListStoppedFlags(t *testing.T) {
+	for _, argv := range [][]string{{"forget"}, {"forget", "/missing/project"}} {
+		a, err := parse(argv)
+		if err != nil || a.command != "forget" {
+			t.Fatalf("forget: %+v %v", a, err)
+		}
+	}
+	a, err := parse([]string{"ls", "--all"})
+	if err != nil || !a.all || a.command != "ls" {
+		t.Fatalf("all contexts: %+v %v", a, err)
+	}
+	if _, err := parse([]string{"forget", "--all"}); err == nil {
+		t.Fatal("unsupported bulk removal accepted")
+	}
+}
+
 func TestBindFallsBackUnlessExplicit(t *testing.T) {
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

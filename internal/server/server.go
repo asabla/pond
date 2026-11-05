@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/asabla/pond/internal/graph"
 	"github.com/asabla/pond/internal/lake"
+	"github.com/asabla/pond/internal/pondctx"
 )
 
 var proxyPrefixes = []string{"/api/", "/_minilake/"}
@@ -38,8 +40,10 @@ type Options struct {
 	Runtime       any
 	RuntimeHealth func(context.Context) error
 	// Peers lists the contexts the UI can switch to, this one included. Nil means none.
-	Peers     func() []Peer
-	Lifecycle context.Context // stops active MCP sessions when the server shuts down
+	Peers func() []Peer
+	// ForgetContext removes a stopped peer's directory from the recent list only.
+	ForgetContext func(string) error
+	Lifecycle     context.Context // stops active MCP sessions when the server shuts down
 }
 
 // Peer is a context the UI can open alongside this one.
@@ -135,12 +139,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if p == "/pond/contexts" || strings.HasPrefix(p, "/ctx/") {
+	if p == "/pond/contexts" || strings.HasPrefix(p, "/pond/contexts/") || strings.HasPrefix(p, "/ctx/") {
 		if reason := crossSite(r); reason != "" {
 			sendJSON(w, http.StatusForbidden, map[string]string{"error_code": "FORBIDDEN", "message": reason})
 			return
 		}
-		if p == "/pond/contexts" {
+		if p == "/pond/contexts" || strings.HasPrefix(p, "/pond/contexts/") {
 			h.contexts(w, r)
 		} else {
 			h.peer(w, r)
@@ -200,6 +204,10 @@ func hostname(hostport string) string {
 }
 
 func (h *handler) contexts(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/pond/contexts/") {
+		h.forgetContext(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		sendJSON(w, http.StatusMethodNotAllowed, map[string]string{"error_code": "METHOD_NOT_ALLOWED", "message": r.Method})
 		return
@@ -209,6 +217,42 @@ func (h *handler) contexts(w http.ResponseWriter, r *http.Request) {
 		peers = append(peers, h.Peers()...)
 	}
 	sendJSON(w, http.StatusOK, map[string]any{"contexts": peers})
+}
+
+func (h *handler) forgetContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.Header().Set("Allow", http.MethodDelete)
+		sendJSON(w, http.StatusMethodNotAllowed, map[string]string{"message": "Use DELETE to remove a stopped context from the list."})
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/pond/contexts/")
+	var peers []Peer
+	if h.Peers != nil {
+		peers = h.Peers()
+	}
+	index := slices.IndexFunc(peers, func(peer Peer) bool { return peer.ID == id })
+	if index < 0 {
+		w.WriteHeader(http.StatusNoContent) // already removed, or unknown: no change
+		return
+	}
+	peer := peers[index]
+	if peer.Self || peer.Running {
+		sendJSON(w, http.StatusConflict, map[string]string{"message": "This context is running. Stop it before removing it from the list."})
+		return
+	}
+	if h.ForgetContext == nil {
+		sendJSON(w, http.StatusNotImplemented, map[string]string{"message": "Context removal is not available on this server."})
+		return
+	}
+	if err := h.ForgetContext(peer.Dir); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, pondctx.ErrRunning) {
+			status = http.StatusConflict
+		}
+		sendJSON(w, status, map[string]string{"message": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // peer serves /ctx/<id>/<path>: this context's own requests are handled here, and

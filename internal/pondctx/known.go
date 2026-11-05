@@ -2,6 +2,8 @@ package pondctx
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -51,26 +53,96 @@ func readRecent() []string {
 // Remember records that c was served, moving it to the front of the recent list. It is
 // best effort: the list only feeds the context switcher.
 func Remember(c Context) {
+	_ = changeRecent(func(dirs []string) []string {
+		dirs = slices.DeleteFunc(dirs, func(d string) bool { return d == c.Dir })
+		dirs = append([]string{c.Dir}, dirs...)
+		return dirs[:min(len(dirs), maxRecent)]
+	})
+}
+
+// Forget removes a stopped context from discovery. It never starts an engine,
+// removes project files, or changes the running context's lifecycle.
+func Forget(c Context) error {
+	// Keep an existing context lock until the registry change finishes, so a
+	// concurrent start cannot be forgotten while it is starting or serving.
+	f, err := os.Open(c.lockPath())
+	if err == nil {
+		defer f.Close()
+		locked, err := lockFile(f)
+		if err != nil {
+			return err
+		}
+		if !locked {
+			return fmt.Errorf("%w: run pond down in %s before removing %s from the list", ErrRunning, c.Dir, c.Name())
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check whether %s is running: %w", c.Name(), err)
+	}
+	return changeRecent(func(dirs []string) []string {
+		return slices.DeleteFunc(dirs, func(dir string) bool { return ForDir(dir).Dir == c.Dir })
+	})
+}
+
+// Serialize read/modify/write across Pond processes. Readers see an atomic rename.
+// The registry lock is separate from a project's lifecycle lock.
+func changeRecent(change func([]string) []string) error {
 	path, err := recentFile()
 	if err != nil {
-		return
+		return err
 	}
-	dirs := slices.DeleteFunc(readRecent(), func(d string) bool { return d == c.Dir })
-	dirs = append([]string{c.Dir}, dirs...)
-	if len(dirs) > maxRecent {
-		dirs = dirs[:maxRecent]
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
 	}
-	b, err := json.Marshal(dirs)
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return
+		return err
 	}
-	if os.MkdirAll(filepath.Dir(path), 0o755) != nil {
-		return
+	defer lock.Close()
+	for attempt := 0; ; attempt++ {
+		ok, err := lockFile(lock)
+		if err != nil {
+			return err
+		}
+		if ok {
+			break
+		}
+		if attempt == 40 {
+			return errors.New("the recent-context list is busy; retry the command")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, b, 0o644) == nil {
-		_ = os.Rename(tmp, path)
+	var dirs []string
+	data, err := os.ReadFile(path)
+	if err == nil {
+		if err := json.Unmarshal(data, &dirs); err != nil {
+			return fmt.Errorf("read recent-context list: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
+	b, err := json.Marshal(change(dirs))
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".recent-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	cache.Lock()
+	cache.at, cache.value = time.Time{}, nil
+	cache.Unlock()
+	return nil
 }
 
 // KnownContexts returns the running contexts, then recently served ones that still have

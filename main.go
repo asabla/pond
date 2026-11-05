@@ -39,7 +39,8 @@ const (
 
 Usage:
   pond [up] [DIR] [flags]   start the context for DIR (default: current directory)
-  pond ls                   list running contexts
+  pond ls [--all]           list running contexts, or include stopped contexts
+  pond forget [DIR]         remove a stopped context from the list (keeps data)
   pond down [DIR]           stop the context for DIR and remove its containers (keeps data)
   pond open [DIR]           open the UI of a running context in a browser
   pond logs [DIR] [flags]   show the context's MiniLake logs
@@ -79,6 +80,7 @@ the context stopped (pond down).
 
 type args struct {
 	command        string
+	all            bool
 	dir            string
 	port           int
 	portExplicit   bool
@@ -99,7 +101,7 @@ type args struct {
 	migrateRuntime bool
 }
 
-var commands = []string{"up", "ls", "down", "open", "logs", "seed", "reset", "export", "import", "version", "graph", "doctor"}
+var commands = []string{"up", "ls", "forget", "down", "open", "logs", "seed", "reset", "export", "import", "version", "graph", "doctor"}
 
 var errHelp = errors.New("help requested")
 
@@ -123,7 +125,9 @@ func main() {
 	case "up":
 		err = up(a)
 	case "ls":
-		ls()
+		ls(a.all)
+	case "forget":
+		err = forget(a)
 	case "down":
 		err = down(a)
 	case "open":
@@ -173,6 +177,8 @@ func parse(argv []string) (*args, error) {
 		fs.StringVar(&a.socket, "runtime-socket", os.Getenv("POND_RUNTIME_SOCKET"), "")
 	}
 	switch a.command {
+	case "ls":
+		fs.BoolVar(&a.all, "all", false, "")
 	case "doctor":
 		fs.StringVar(&a.minilake, "minilake", os.Getenv("MINILAKE_URL"), "")
 	case "up":
@@ -460,7 +466,8 @@ func up(a *args) (result error) {
 	srv = &http.Server{Handler: server.New(server.Options{
 		Host: a.host, AllowedHosts: allowedHosts, Lake: client, Context: ctxInfo, DataRoot: dataRoot,
 		Static: static, Version: version, Peers: peers(c), Runtime: runtimeInfo, RuntimeHealth: runtimeHealth,
-		Lifecycle: sig,
+		ForgetContext: func(dir string) error { return pondctx.Forget(pondctx.ForDir(dir)) },
+		Lifecycle:     sig,
 	}),
 		// Bounds only the request headers; bodies and MCP streams can take as long as they need.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -596,15 +603,28 @@ func openBrowser(url string) {
 	}
 }
 
-func ls() {
+func forget(a *args) error {
+	c := pondctx.ForDir(a.dir)
+	if err := pondctx.Forget(c); err != nil {
+		return err
+	}
+	logf("Removed %s from the recent-context list. Lake data is kept in %s. Run `%s` to add it again.", c.Name(), c.StateDir(), startCommand(a.dir))
+	return nil
+}
+
+func ls(all bool) {
 	var running []pondctx.Known
 	for _, c := range pondctx.KnownContexts() {
-		if c.Running {
+		if c.Running || all {
 			running = append(running, c)
 		}
 	}
 	if len(running) == 0 {
-		logf("No running pond contexts.")
+		if all {
+			logf("No known pond contexts.")
+		} else {
+			logf("No running pond contexts. Use `pond ls --all` to include stopped contexts.")
+		}
 		return
 	}
 	rows := [][]string{{"NAME", "UI", "DIR", "STATUS"}}
@@ -613,7 +633,13 @@ func ls() {
 		if ui == "" {
 			ui = "-"
 		}
-		rows = append(rows, []string{r.Name, ui, r.Dir, r.Status})
+		status := r.Status
+		if !r.Running {
+			status = "Stopped"
+		} else if status == "" {
+			status = "Running"
+		}
+		rows = append(rows, []string{r.Name, ui, r.Dir, status})
 	}
 	var widths [3]int
 	for _, r := range rows {

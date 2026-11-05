@@ -7,7 +7,7 @@
 // in one context and a table in another can sit side by side.
 import { createLake, LakeError } from "./lake.js";
 import { listGraphs } from "./graph.js";
-import { $, h, toast, store, snippet, reconcile, shellQuote } from "./dom.js";
+import { $, h, toast, store, snippet, reconcile, shellQuote, action } from "./dom.js";
 import { registerWebMcp, agentTrust } from "./webmcp.js";
 import { createHomeView } from "./views/home.js";
 import { createDataView } from "./views/data.js";
@@ -84,13 +84,22 @@ const state = {
 const newNav = () => ({ open: new Set(), catalogs: null, schemas: {}, children: {}, queries: null, graphs: null, jobs: null, errors: {} });
 
 const self = () => state.contexts.find((c) => c.self) ?? state.contexts[0];
-const byId = (id) => state.contexts.find((c) => c.id === id);
+const byId = (id) => state.contexts.find((c) => c.id === id) ?? state.tabs.find((tab) => tab.ctx.id === id)?.ctx;
 
 // A context keeps its colour for good: the slot comes from its id, not its position.
 function slotOf(id) {
   let n = 0;
   for (const ch of id) n = (n * 31 + ch.charCodeAt(0)) >>> 0;
   return n % SLOTS;
+}
+
+function newContext(context) {
+  const nav = newNav();
+  for (const key of store(STATE_KEY)?.navOpen?.[context.id] ?? []) nav.open.add(key);
+  return {
+    ...context, slot: slotOf(context.id), lake: createLake(context.self ? "" : `/ctx/${encodeURIComponent(context.id)}`),
+    config: null, offline: null, nav,
+  };
 }
 
 async function loadContexts() {
@@ -115,17 +124,14 @@ async function loadContexts() {
   const next = listed.map((c) => {
     const known = byId(c.id);
     if (known) return Object.assign(known, { running: c.running, status: c.status, ui: c.ui, name: c.name, dir: c.dir });
-    const nav = newNav();
-    for (const key of store(STATE_KEY)?.navOpen?.[c.id] ?? []) nav.open.add(key);
-    return {
-      ...c, slot: slotOf(c.id), lake: createLake(c.self ? "" : `/ctx/${encodeURIComponent(c.id)}`),
-      config: null, offline: null, nav,
-    };
+    return newContext(c);
   });
+  for (const tab of state.tabs) if (!next.some((ctx) => ctx.id === tab.ctx.id)) tab.ctx.running = false;
   state.contexts = next;
   renderConnection();
   renderNav();
   renderTabs();
+  for (const ctx of next) if (ctx.running) watch(ctx);
 }
 
 /** @param {Ctx} ctx */
@@ -418,7 +424,7 @@ function closeTab(tab) {
   tab.el?.remove();
   if (!tab.agent) {
     const closed = store("pond.closedTabs") ?? [];
-    closed.unshift({ id: tab.id, ctx: tab.ctx.id, view: tab.view, parts: tab.parts, title: tab.title });
+    closed.unshift({ id: tab.id, ctx: tab.ctx.id, context: { name: tab.ctx.name, dir: tab.ctx.dir }, view: tab.view, parts: tab.parts, title: tab.title });
     for (const old of closed.splice(20)) store(`pond.draft.${old.id}`, null);
     store("pond.closedTabs", closed);
     toast(`Closed ${titleOf(tab)}. Use Reopen closed tab to restore it.`);
@@ -438,7 +444,7 @@ function reopenClosedTab() {
   const closed = store("pond.closedTabs") ?? [];
   const saved = closed.shift();
   if (!saved) return;
-  const ctx = byId(saved.ctx);
+  const ctx = byId(saved.ctx) ?? (saved.context?.dir ? newContext({ ...saved.context, id: saved.ctx, running: false, self: false }) : null);
   if (!ctx) return toast("Start the original context to reopen this item.", "err");
   store("pond.closedTabs", closed);
   const tab = { ...saved, ctx };
@@ -448,7 +454,7 @@ function reopenClosedTab() {
 
 function persist() {
   store(STATE_KEY, {
-    tabs: state.tabs.filter((t) => !t.agent).map((t) => ({ id: t.id, ctx: t.ctx.id, view: t.view, parts: t.parts, title: t.title })),
+    tabs: state.tabs.filter((t) => !t.agent).map((t) => ({ id: t.id, ctx: t.ctx.id, context: { name: t.ctx.name, dir: t.ctx.dir }, view: t.view, parts: t.parts, title: t.title })),
     active: state.active?.id ?? null,
     navOpen: Object.fromEntries(state.contexts.map((c) => [c.id, [...c.nav.open]])),
   });
@@ -458,7 +464,9 @@ function restore() {
   const saved = store(STATE_KEY);
   if (!saved?.tabs) return false;
   for (const t of saved.tabs) {
-    const ctx = byId(t.ctx);
+    // Forgetting removes discovery only. Open tabs and drafts can still be used
+    // offline and restored without putting the context back in the navigator.
+    const ctx = byId(t.ctx) ?? (t.context?.dir ? newContext({ ...t.context, id: t.ctx, running: false, self: false }) : null);
     if (ctx && FACTORIES[t.view]) state.tabs.push({ id: t.id, ctx, view: t.view, parts: t.parts ?? [], title: t.title });
   }
   return state.tabs.length > 0 ? saved.active : false;
@@ -807,7 +815,7 @@ function listGroup(ctx, { key, label, icon: ic, item, all, allCurrent, empty }) 
 /** @param {Ctx} ctx */
 function contextSection(ctx) {
   const nav = ctx.nav;
-  const isOpen = state.filter ? ctx.running : nav.open.has("ctx");
+  const isOpen = Boolean(state.filter) || nav.open.has("ctx");
   const status = !ctx.running ? "stopped" : ctx.offline ? "offline" : "ok";
   const statusText = { ok: "Running", offline: "Not responding", stopped: "Stopped" }[status];
   const head = h("div", { class: "ctx-head", style: `--ctx: var(--series-${ctx.slot + 1})` },
@@ -826,8 +834,11 @@ function contextSection(ctx) {
     h("span", { class: "ctx-dir", title: ctx.dir }, shortDir(ctx.dir)));
   if (!isOpen) return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head);
   if (!ctx.running) {
+    const remove = action("Remove from list", () => forgetContext(ctx), "ghost", false);
+    remove.setAttribute("aria-label", `Remove ${ctx.name} (${ctx.dir}) from list`);
     return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head,
-      h("div", { class: "ctx-stopped" }, h("p", {}, "Start it to open its lake here:"), snippet(`pond ${shellQuote(ctx.dir)}`)));
+      h("div", { class: "ctx-stopped" }, h("p", {}, "Start it to open its lake here:"), snippet(`pond ${shellQuote(ctx.dir)}`),
+        remove, h("p", { class: "help" }, "Removes the list entry. Lake data, open tabs and browser drafts are kept.")));
   }
   const graphsItem = (g) => ({ label: g.name, icon: "graph", onclick: navOpen(ctx, "graph", [g.name]), current: isCurrent(ctx, "graph", [g.name]) });
   return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head,
@@ -848,6 +859,19 @@ function contextSection(ctx) {
         h("li", {}, row({ label: "Scripts", icon: "workspace", onclick: navOpen(ctx, "files", ["workspace"]), current: isCurrent(ctx, "files", ["workspace"]) })),
         h("li", {}, row({ label: "Settings", icon: "settings", onclick: navOpen(ctx, "admin", []), current: isCurrent(ctx, "admin", []) })),
       ]));
+}
+
+async function forgetContext(ctx) {
+  const response = await fetch(`/pond/contexts/${encodeURIComponent(ctx.id)}`, { method: "DELETE", signal: AbortSignal.timeout(5000) });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    await loadContexts();
+    throw new Error(error.message || `Could not remove this context (${response.status}).`);
+  }
+  await loadContexts();
+  persist();
+  $("#filter").focus({ preventScroll: true });
+  toast(`Removed ${ctx.name} from the list. Lake data and browser drafts are kept. Run pond in its folder to add it again.`);
 }
 
 /** @param {Ctx} ctx @param {any} sq @param {MouseEvent} [e] */
@@ -879,7 +903,7 @@ function stampFocus(nodes, prefix) {
 function renderNav() {
   const root = $("#nav-contexts");
   if (!state.contexts.length) return root.replaceChildren(h("p", { class: "nav-note" }, h("span", { class: "loading" })));
-  const sections = state.contexts.filter((c) => !state.filter || c.running).map(contextSection);
+  const sections = state.contexts.filter((c) => !state.filter || c.running || `${c.name} ${c.dir}`.toLowerCase().includes(state.filter.toLowerCase())).map(contextSection);
   stampFocus(sections, "nav");
   reconcile(root, sections);
 }

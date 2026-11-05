@@ -63,7 +63,8 @@ Open the UI URL in a browser, or run the printed `claude mcp add` command to giv
 
 ```sh
 pond [up] [DIR] [flags]          # start the context for DIR (default: current directory)
-pond ls                          # list running contexts across directories
+pond ls [--all]                  # list running contexts; --all includes stopped ones
+pond forget [DIR]                # remove a stopped context from the recent list; keep its data
 pond down [DIR]                  # stop a context and remove its containers (keeps data)
 pond open [DIR]                  # open a running context's UI in the browser
 pond logs [DIR] [-f] [--tail N]  # show the context's MiniLake logs
@@ -139,6 +140,7 @@ Each directory is its own **context**, so data from different projects never mix
 - **One pond per context.** The running pond holds a lock on `.pond/lock`, so a second `pond` in the same directory points you at the first one instead of starting another lake.
 - **The context name is visible everywhere:** in the terminal banner, the UI's navigator and tabs (each context has its own colour), the browser tab title, the suggested MCP server name and WebMCP's `get_view` tool.
 - **Every pond's UI shows every context.** Open any of them and the navigator lists all running contexts, plus recently used ones that are stopped, with the command to start them. Tables, queries and graphs from different directories open as tabs side by side. Requests for another context go through the pond you have open, so the page stays on one origin. MCP stays per context, so an agent works in one lake at a time.
+- **Remove an old context from the list** with `pond forget DIR`, or expand its stopped entry in the navigator and select **Remove from list**. Use `pond ls --all` to find stopped contexts in the CLI. Removal keeps the project's `.pond` data, open tabs and browser drafts. It refuses a running context and needs no container CLI. Run `pond DIR` again to add it back.
 - **Copy a table between contexts** with **Copy to…** on its page. It is copied as it is then, through a Parquet file, so the copy doesn't change when the original does.
 
 Ctrl-C stops the context gracefully (MiniLake snapshots its state), then removes every container on the context's network and the network itself. If pond was killed, the next `pond` in that directory cleans up the leftovers first.
