@@ -443,7 +443,7 @@ export function buildTools(ui) {
       annotations: READ,
       execute: async ({ metric, top = 10 }) => {
         ui.navigate("graph");
-        const result = await views.graph.ranking(metric, top);
+        const result = await views.graph.ranking(metric, Math.min(100, Math.max(1, Math.trunc(Number(top)) || 10)));
         await views.graph.style(METRICS[metric] ? { size: metric } : { color: metric });
         return result;
       },

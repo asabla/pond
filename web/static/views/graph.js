@@ -1048,11 +1048,11 @@ export function createGraphView(ui) {
   // Ranked nodes for a metric or grouping, for agents and the table.
   async function ranking(name, top = 10) {
     if (!s.graph) throw new Error("No graph is open. Use open_graph first.");
-    if (METRICS[name]) {
+    if (Object.hasOwn(METRICS, name)) {
       const vals = await metric(name);
       return Object.entries(vals).sort((a, b) => b[1] - a[1]).slice(0, top).map(([n, v]) => ({ node: s.graph.getNodeAttribute(n, "raw"), label: label(n), value: v }));
     }
-    if (!GROUPINGS[name] && !name.startsWith("attr:")) {
+    if (!Object.hasOwn(GROUPINGS, name) && !name.startsWith("attr:")) {
       throw new Error(`Unknown metric ${name}. Use one of: ${[...Object.keys(METRICS), ...Object.keys(GROUPINGS)].join(", ")}.`);
     }
     const grp = await grouping(name);
