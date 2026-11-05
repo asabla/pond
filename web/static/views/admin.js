@@ -1,10 +1,10 @@
 // @ts-check
-// Admin: this context, warehouses, secrets, MiniLake services, and resetting the lake.
+// Settings: the context, connecting agents, warehouses, secrets, and resetting the lake.
 import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, snippet, fmtTime } from "../dom.js";
 
 export function createAdminView(ui) {
   const { lake } = ui;
-  const el = h("section", { class: "view", "aria-label": "Admin" });
+  const el = h("section", { class: "view", "aria-label": "Settings" });
   let token = 0;
   const openScopes = new Set();
 
@@ -16,21 +16,19 @@ export function createAdminView(ui) {
     const t = ++token;
     page(loading());
     try {
-      const [cfg, warehouses, scopes, services] = await Promise.all([
-        lake.config(), lake.listWarehouses(), lake.listScopes(), lake.services().catch(() => ({})),
-      ]);
+      const [cfg, warehouses, scopes] = await Promise.all([lake.config(), lake.listWarehouses(), lake.listScopes()]);
       const secrets = Object.fromEntries(await Promise.all(scopes.map(async (s) => [s.name, await lake.listSecrets(s.name).catch(() => [])])));
       if (t !== token) return;
-      render({ cfg, warehouses, scopes, secrets, services });
+      render({ cfg, warehouses, scopes, secrets });
     } catch (err) {
       if (t === token) page(errorBox(err.message));
     }
   }
 
-  function render({ cfg, warehouses, scopes, secrets, services }) {
+  function render({ cfg, warehouses, scopes, secrets }) {
     const ctx = cfg.context;
     page(
-      h("div", { class: "title-row" }, h("h1", {}, "Admin")),
+      h("div", { class: "title-row" }, h("h1", {}, "Settings")),
 
       section("Context", null, ctx
         ? h("dl", { class: "kv" },
@@ -42,6 +40,10 @@ export function createAdminView(ui) {
           cfg.version && [h("dt", {}, "Pond"), h("dd", {}, cfg.version)])
         : h("p", { class: "help" }, `Attached to a MiniLake pond does not manage: ${cfg.minilake_url}`)),
       ctx && h("div", { class: "help" }, "Container logs:", snippet(`docker logs -f ${ctx.container}`)),
+
+      ui.mcpUrl && section("Connect an agent", null,
+        h("p", { class: "help" }, "Each context has its own MCP server. Register it under the context's name in Claude Code, Claude Desktop, Codex or another MCP client."),
+        snippet(`claude mcp add --transport http pond-${ctx?.name ?? "lake"} ${ui.mcpUrl}`)),
 
       section("SQL warehouses", button("New warehouse", newWarehouse),
         table(warehouses, [
@@ -63,10 +65,6 @@ export function createAdminView(ui) {
         scopes.length
           ? h("div", { class: "scopes" }, scopes.map((s) => scopeBlock(s, secrets[s.name] ?? [])))
           : empty("No secret scopes.")),
-
-      section("MiniLake services", null,
-        h("div", { class: "chips" }, Object.entries(services).map(([name, info]) =>
-          h("span", { class: `chip ${info.registered ? "" : "off"}`, title: info.registered ? "available" : "not available" }, name.replaceAll("_", " "))))),
 
       h("div", { class: "section danger-zone" },
         h("h2", {}, "Reset lake"),

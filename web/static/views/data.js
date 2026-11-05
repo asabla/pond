@@ -1,6 +1,7 @@
 // @ts-check
 // Data: catalogs → schemas → tables and volumes. Create, drop, preview, and import files.
-import { h, grid, table, action, button, snippet, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtBytes, guard } from "../dom.js";
+import { copyTable } from "../lake.js";
+import { h, grid, table, action, button, snippet, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtBytes, guard, store, syncTabs } from "../dom.js";
 
 const PREVIEW_ROWS = 100;
 const NAME = "^[A-Za-z_][A-Za-z0-9_]*$";
@@ -72,32 +73,20 @@ export function createDataView(ui) {
   async function home(_, live) {
     const catalogs = await lake.listCatalogs();
     if (!live()) return;
-    const ctx = ui.context;
     page(
       header({
-        title: ctx ? ctx.name : "Your lake",
-        badges: [ctx && { text: "context", accent: true }],
-        sub: ctx?.dir,
+        title: "Catalogs",
         actions: [button("Import file", guard(() => importDialog())), button("New catalog", newCatalog, "primary")],
       }),
       h("p", { class: "lede" }, "Catalogs hold schemas, which hold tables and volumes. Drop a CSV, JSON or Parquet file anywhere here to turn it into a table."),
-      section("Catalogs", catalogs.length,
-        catalogs.length
-          ? h("div", { class: "cards" }, catalogs.map((c) => h("a", { class: "card", href: `#/data/${c.name}` }, h("b", {}, c.name), h("span", {}, c.comment || "catalog"))))
-          : empty("No catalogs yet. ", h("button", { class: "linkish", onclick: newCatalog }, "Create the first one"), ".")),
-      connectSection(),
+      catalogs.length
+        ? table(catalogs, [
+          ["Name", (c) => h("a", { href: `#/data/${c.name}` }, c.name)],
+          ["Comment", (c) => c.comment ?? ""],
+          ["Created", (c) => fmtTime(c.created_at)],
+        ], { onRow: (c) => ui.navigate("data", c.name) })
+        : empty("No catalogs yet. ", h("button", { class: "linkish", onclick: newCatalog }, "Create the first one"), "."),
     );
-  }
-
-  function connectSection() {
-    const ctx = ui.context;
-    const mcpUrl = `${location.origin}/mcp`;
-    return section("Connect an agent", null,
-      h("p", { class: "help" }, ctx
-        ? "MCP for Claude Code, Claude Desktop, Codex and other MCP clients. Each context has its own MCP server, so register it under the context's name."
-        : "MCP for Claude Code, Claude Desktop, Codex and other MCP clients. Pond forwards to MiniLake's MCP server."),
-      snippet(`claude mcp add --transport http ${ctx ? `pond-${ctx.name}` : "pond"} ${mcpUrl}`),
-      h("p", { class: "help" }, "WebMCP: agents in the browser can use this page directly: browse, query, import, run jobs and manage files. What they do shows up here, and destructive actions ask you first."));
   }
 
   async function catalog(name, live) {
@@ -179,18 +168,41 @@ export function createDataView(ui) {
         actions: [
           action("Drop", () => dropObject("table", t.full_name), "danger-ghost"),
           button("Append file", guard(() => importDialog(null, { catalog: t.catalog_name, schema: t.schema_name, table: t.name, mode: "append" }))),
+          otherContexts().length > 0 && button("Copy to…", guard(() => copyDialog(t))),
           columns.length > 1 && button("Open as graph", () => ui.views.graph.newGraph({ edgeTable: t.full_name })),
           button("Query", () => ui.views.query.open(query), "primary"),
         ],
       }),
-      section("Columns", columns.length, h("div", { class: "grid-wrap" }, h("table", { class: "grid col-table" },
-        h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}, "Nullable"), h("th", {}, "Comment"))),
-        h("tbody", {}, columns.map((c) => h("tr", {},
-          h("td", {}, c.name), h("td", {}, c.type_text ?? ""), h("td", {}, c.nullable === false ? "no" : "yes"),
-          h("td", { class: c.comment ? null : "null" }, c.comment ?? ""))))))),
-      section("Preview", preview.value && `first ${Math.min(PREVIEW_ROWS, preview.value.rows.length)} rows`, previewBody),
-      section("Details", null, h("dl", { class: "kv" }, details.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]))),
+      tablePanes(t, {
+        preview: () => [
+          preview.value && h("p", { class: "pane-note" }, `First ${Math.min(PREVIEW_ROWS, preview.value.rows.length)} rows`),
+          previewBody,
+        ],
+        columns: () => h("div", { class: "grid-wrap" }, h("table", { class: "grid list col-table" },
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Type"), h("th", {}, "Nullable"), h("th", {}, "Comment"))),
+          h("tbody", {}, columns.map((c) => h("tr", {},
+            h("td", {}, h("code", {}, c.name)), h("td", {}, h("code", {}, c.type_text ?? "")), h("td", {}, c.nullable === false ? "no" : "yes"),
+            h("td", { class: c.comment ? null : "muted" }, c.comment ?? "")))))),
+        details: () => h("dl", { class: "kv" }, details.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+      }, columns.length),
     );
+  }
+
+  // Preview, columns and details share the space under the title; the choice is remembered.
+  function tablePanes(t, panes, columnCount) {
+    let pane = store("pond.tablePane") ?? "preview";
+    if (!panes[pane]) pane = "preview";
+    const id = `table-pane-${ui.uid ?? "main"}`;
+    const list = h("div", { class: "segmented", role: "tablist", "aria-label": `${t.name} views` });
+    const body = h("div", { class: "pane", id, role: "tabpanel" });
+    const select = (key) => {
+      pane = key;
+      store("pond.tablePane", key);
+      syncTabs(list, [["preview", "Preview"], ["columns", `Columns ${columnCount}`], ["details", "Details"]], pane, select, id);
+      body.replaceChildren(...[panes[key]()].flat().filter(Boolean));
+    };
+    select(pane);
+    return [list, body];
   }
 
   async function volume(fullName, live) {
@@ -351,6 +363,40 @@ export function createDataView(ui) {
     });
   }
 
+  const otherContexts = () => (ui.contexts?.() ?? []).filter((c) => c.running && c !== ui.ctx);
+
+  // Copies a table into another running context, through a Parquet file.
+  async function copyDialog(t) {
+    const targets = otherContexts();
+    const v = await formDialog({
+      title: `Copy ${t.name} to another context`,
+      intro: "The table is copied as it is now. Later changes here don't follow it.",
+      fields: [
+        { name: "target", label: "Context", type: "select", options: targets.map((c) => ({ value: c.id, label: `${c.name} · ${c.dir}` })) },
+        { name: "catalog", label: "Catalog", value: t.catalog_name, required: true, pattern: NAME },
+        { name: "schema", label: "Schema", value: t.schema_name, required: true, pattern: NAME },
+        { name: "table", label: "Table", value: t.name, required: true, pattern: NAME },
+        { name: "mode", label: "If the table exists there", type: "select", value: "create", options: [
+          { value: "create", label: "Fail" }, { value: "replace", label: "Replace it" }, { value: "append", label: "Append rows" }] },
+      ],
+      submit: "Copy",
+    });
+    if (!v) return;
+    const target = targets.find((c) => c.id === v.target);
+    if (!target) return;
+    if (v.mode === "replace" && !(await confirmDialog({
+      title: `Replace ${v.catalog}.${v.schema}.${v.table} in ${target.name}?`,
+      body: "Its rows there are replaced by this table's.", confirm: "Replace",
+    }))) return;
+    await run(async () => {
+      toast(`Copying ${t.full_name} to ${target.name}…`);
+      const res = await copyTable(lake, target.lake, { source: t.full_name, catalog: v.catalog, schema: v.schema, table: v.table, mode: v.mode });
+      toast(`Copied ${res.rows} rows to ${res.table} in ${target.name}`);
+      await ui.refreshContext?.(target);
+      ui.openIn?.(target, "data", [res.table]);
+    });
+  }
+
   async function run(fn) {
     try {
       await fn();
@@ -363,6 +409,7 @@ export function createDataView(ui) {
     el,
     show,
     dropObject,
+    importDialog: guard(importDialog),
     treeChanged() {
       if (current.kind === "home" && !el.hidden) show([]);
     },

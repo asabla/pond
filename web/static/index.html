@@ -4,49 +4,74 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pond</title>
-  <meta name="description" content="A local data lake per directory. Agents can drive this page through WebMCP.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cellipse cx='16' cy='18' rx='14' ry='9' fill='%230e7c86'/%3E%3Cellipse cx='16' cy='17' rx='8' ry='4' fill='%238fd3d9'/%3E%3C/svg%3E">
+  <meta name="description" content="Local data lakes, one per directory, side by side. Agents can drive this page through WebMCP.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M3 19c0-6 6-10 13-10s13 4 13 10-6 7-13 7S3 25 3 19z' fill='%2317594f'/%3E%3Cpath d='M9 18c2-3 5-4 7-4s5 1 7 4' fill='none' stroke='%23b8d45a' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preload" href="/fonts/schibsted-grotesk-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
-  <script type="module" src="/app.js"></script>
+  <script>
+    // Apply a chosen theme before the first paint, so dark mode doesn't flash light.
+    try {
+      const t = JSON.parse(localStorage.getItem("pond.theme"));
+      if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    } catch {}
+  </script>
+  <script type="module" src="/workbench.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="#/data" aria-label="Pond home">
-      <svg viewBox="0 0 32 32" aria-hidden="true"><ellipse cx="16" cy="18" rx="14" ry="9" class="brand-outer"/><ellipse cx="16" cy="17" rx="8" ry="4" class="brand-inner"/></svg>
-      <span class="brand-name">pond</span>
+  <header class="titlebar">
+    <button class="icon-btn nav-btn" id="nav-btn" aria-label="Contexts" aria-expanded="false" aria-controls="nav"><span class="ico ico-menu" aria-hidden="true"></span></button>
+    <a class="brand" href="#" aria-label="Pond">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path class="brand-water" d="M3 19c0-6 6-10 13-10s13 4 13 10-6 7-13 7S3 25 3 19z"/><path class="brand-ripple" d="M9 18c2-3 5-4 7-4s5 1 7 4"/></svg>
+      <span>pond</span>
     </a>
-    <span class="context-chip" id="context" hidden></span>
-    <nav class="tabs" aria-label="Sections">
-      <a href="#/data" data-view="data">Data</a>
-      <a href="#/query" data-view="query">Query <kbd>⌘K</kbd></a>
-      <a href="#/graph" data-view="graph">Graph</a>
-      <a href="#/jobs" data-view="jobs">Jobs</a>
-      <a href="#/files" data-view="files">Files</a>
-      <a href="#/admin" data-view="admin">Admin</a>
-    </nav>
-    <div class="status">
-      <span class="pill" id="pill-lake" title="MiniLake connection"><i></i><span>MiniLake</span></span>
-      <span class="pill" id="pill-mcp" title="MCP endpoint for desktop agents"><i></i><span>MCP</span></span>
-      <span class="pill" id="pill-webmcp" title="WebMCP tools registered on this page"><i></i><span>WebMCP</span></span>
-      <button class="pill pill-btn" id="activity-btn" title="Agent activity" aria-expanded="false" hidden><span>Agent</span><b id="activity-count">0</b></button>
+    <button class="palette-btn" id="palette-btn" aria-haspopup="dialog">
+      <span class="ico ico-search" aria-hidden="true"></span>
+      <span class="palette-btn-text">Search tables, queries and graphs, or run a command</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <div class="titlebar-end">
+      <button class="icon-btn" id="theme-btn" aria-label="Theme"><span class="ico ico-theme" aria-hidden="true"></span></button>
+      <button class="activity-btn" id="activity-btn" aria-expanded="false" aria-controls="activity">
+        <span class="ico ico-activity" aria-hidden="true"></span><span class="activity-btn-text">Activity</span><b id="activity-count" hidden></b>
+      </button>
     </div>
   </header>
 
-  <div class="layout" id="layout">
-    <aside class="sidebar">
-      <div class="sidebar-head">
-        <input id="filter" type="search" placeholder="Filter…" autocomplete="off" spellcheck="false" aria-label="Filter catalog tree">
-        <button class="icon-btn" id="refresh-tree" title="Reload" aria-label="Reload catalogs">↻</button>
+  <div class="workbench">
+    <nav class="nav" id="nav" aria-label="Contexts">
+      <div class="nav-head">
+        <input id="filter" class="input" type="search" placeholder="Filter" autocomplete="off" spellcheck="false" aria-label="Filter tables, queries and graphs">
+        <button class="icon-btn" id="refresh-nav" title="Reload" aria-label="Reload contexts"><span class="ico ico-refresh" aria-hidden="true"></span></button>
       </div>
-      <ul class="tree" id="tree" role="tree" aria-label="Catalogs"></ul>
+      <div class="nav-contexts" id="nav-contexts"></div>
+    </nav>
+
+    <main class="main">
+      <div class="tabs" id="tabs" role="tablist" aria-label="Open items"></div>
+      <div class="panels" id="panels"></div>
+    </main>
+
+    <aside class="activity" id="activity" hidden aria-label="Activity">
+      <header class="activity-head">
+        <h2>Activity</h2>
+        <button class="icon-btn" id="activity-close" aria-label="Hide activity"><span class="ico ico-close" aria-hidden="true"></span></button>
+      </header>
+      <div class="activity-agents">
+        <p id="webmcp-status"></p>
+        <label class="check"><input type="checkbox" id="trust"> Ask before agents delete or replace data</label>
+      </div>
+      <ol class="activity-log" id="activity-log"></ol>
     </aside>
-    <main class="main" id="main"></main>
   </div>
 
-  <aside class="activity" id="activity" hidden aria-label="Agent activity">
-    <header><b>Agent activity</b><span class="muted">via WebMCP</span></header>
-    <ol id="activity-log"></ol>
-  </aside>
+  <dialog class="palette" id="palette" aria-label="Search and commands">
+    <div class="palette-box">
+      <input id="palette-input" class="palette-input" type="text" placeholder="Search, or type a command" autocomplete="off" spellcheck="false"
+        role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list">
+      <ul class="palette-list" id="palette-list" role="listbox" aria-label="Results"></ul>
+      <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open <kbd>⌘↵</kbd> new tab <kbd>esc</kbd> close</p>
+    </div>
+  </dialog>
   <div class="toasts" id="toasts" aria-live="polite"></div>
 </body>
 </html>

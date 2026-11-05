@@ -21,7 +21,7 @@ export const OVERVIEW_SEEDS = 20;
 export const OVERVIEW_EDGES = 500;
 export const NEIGHBOR_LIMIT = 100;
 // Category slots before the rest fold into "Other" (see the palette in style.css).
-export const SLOTS = 8;
+export const SLOTS = 6;
 
 /* ---------- Definitions ---------- */
 

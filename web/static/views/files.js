@@ -1,5 +1,6 @@
 // @ts-check
 // Files: the lake's file system (DBFS root, including /Volumes) and the workspace.
+import { createCodeEditor } from "../editor.js";
 import { h, grid, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, download, fmtTime, fmtBytes } from "../dom.js";
 
 const TEXT_PREVIEW_BYTES = 64 * 1024;
@@ -102,14 +103,14 @@ export function createFilesView(ui) {
         onRow: (e) => (e.is_directory ? go("dbfs", e.path) : select(e)),
         empty: "Empty folder. Drop files here or use Upload.",
       }),
-      h("div", { id: "file-preview" }),
+      h("div", { class: "file-preview" }),
     );
     if (current.selected) select(current.selected);
   }
 
   async function select(entry) {
     current.selected = entry;
-    const box = el.querySelector("#file-preview");
+    const box = el.querySelector(".file-preview");
     box.replaceChildren(h("div", { class: "section" }, loading()));
     const dataFormat = lake.formatOf(entry.name);
     const vol = volumeOf(entry.path);
@@ -244,17 +245,18 @@ export function createFilesView(ui) {
           show(["workspace", ...current.path.split("/").filter(Boolean)]);
         }, "ghost danger-text")],
       ], { onRow: (o) => go("workspace", o.path), empty: "Empty folder." }),
-      h("div", { id: "file-preview" }),
+      h("div", { class: "file-preview" }),
     );
     if (file) openWorkspaceFile(file, objects.find((o) => o.path === file));
   }
 
   async function openWorkspaceFile(path, info) {
-    const box = el.querySelector("#file-preview");
+    const box = el.querySelector(".file-preview");
     box.replaceChildren(h("div", { class: "section" }, loading()));
     const source = await lake.exportWorkspace(path).catch((err) => (box.replaceChildren(errorBox(err.message)), null));
     if (source == null) return;
-    const editor = h("textarea", { class: "editor code-editor", spellcheck: "false", "aria-label": path }, source);
+    const code = createCodeEditor({ language: "python", value: source, label: path, className: "script-editor" });
+    const editor = code.input;
     const isPython = /\.py$/.test(path) || info?.language === "PYTHON";
     box.replaceChildren(h("div", { class: "section preview" },
       h("div", { class: "title-row" }, h("h2", {}, baseName(path)), h("div", { class: "actions" },
@@ -268,7 +270,7 @@ export function createFilesView(ui) {
           ui.navigate("jobs", "run", run_id);
         }, "primary"))),
       h("p", { class: "context-dir mono" }, path),
-      editor));
+      code.el));
   }
 
   async function newScript() {

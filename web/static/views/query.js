@@ -2,34 +2,52 @@
 // Query: SQL editor, results, saved queries and the lake's query history.
 import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, fmtTime, fmtDuration, guard, syncTabs } from "../dom.js";
 import { changesCatalog } from "../sql.js";
+import { createCodeEditor } from "../editor.js";
 
 const GRID_MAX_ROWS = 1000;
-const DRAFT_KEY = "pond.draft";
+
+// The SQL a saved query shows in a list: its first line that isn't a comment.
+const firstLine = (sql) => sql.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("--")) ?? sql.trim();
 
 export function createQueryView(ui) {
   const { lake } = ui;
-  const state = { running: false, last: null, panel: store("pond.queryPanel") ?? "saved", savedId: null };
+  // Each query tab keeps its own draft.
+  const draftKey = `pond.draft.${ui.uid ?? "main"}`;
+  const panelId = `query-panel-${ui.uid ?? "main"}`;
+  const state = { running: false, last: null, panel: store("pond.queryPanel") ?? "history", panelOpen: store("pond.queryPanelOpen") ?? false, savedId: null };
 
-  const editor = h("textarea", { class: "editor", spellcheck: "false", autocomplete: "off", "aria-label": "SQL editor", placeholder: "SELECT * FROM catalog.schema.table LIMIT 100" });
+  const code = createCodeEditor({ language: "sql", label: "SQL editor", placeholder: "SELECT * FROM catalog.schema.table LIMIT 100", className: "query-editor" });
+  const editor = code.input;
   const runBtn = h("button", { class: "btn primary", onclick: () => runEditor() }, "Run ", h("kbd", {}, "⌘↵"));
   const saveBtn = h("button", { class: "btn", onclick: guard(() => save()) }, "Save");
-  const savedLabel = h("span", { class: "muted saved-label" });
+  const savedLabel = h("span", { class: "saved-label" });
+  const panelBtn = h("button", { class: "btn ghost", "aria-expanded": String(state.panelOpen), "aria-controls": panelId, onclick: () => togglePanel() }, "History");
   const results = h("div", { class: "results" });
-  const panelBody = h("div", { class: "panel-body", id: "query-panel", role: "tabpanel" });
+  const panelBody = h("div", { class: "panel-body", id: panelId, role: "tabpanel" });
   const panelTabs = h("div", { class: "panel-tabs", role: "tablist" });
+  const panel = h("aside", { class: "query-panel", hidden: !state.panelOpen }, panelTabs, panelBody);
 
   const el = h("section", { class: "view query-view", "aria-label": "Query" },
     h("div", { class: "query-main" },
       h("div", { class: "editor-wrap" },
         h("div", { class: "editor-bar" }, runBtn, saveBtn, savedLabel,
           h("span", { class: "spacer" }),
-          h("span", { class: "muted dialect", title: "MiniLake executes SQL with DuckDB, not Spark SQL" }, "DuckDB dialect")),
-        editor),
+          h("span", { class: "dialect", title: "MiniLake executes SQL with DuckDB, not Spark SQL" }, "DuckDB SQL"),
+          panelBtn),
+        code.el),
       results),
-    h("aside", { class: "query-panel" }, panelTabs, panelBody));
+    panel);
 
-  editor.value = store(DRAFT_KEY) ?? "";
-  editor.addEventListener("input", () => store(DRAFT_KEY, editor.value));
+  function togglePanel(force) {
+    state.panelOpen = typeof force === "boolean" ? force : !state.panelOpen;
+    store("pond.queryPanelOpen", state.panelOpen);
+    panel.hidden = !state.panelOpen;
+    panelBtn.setAttribute("aria-expanded", String(state.panelOpen));
+    if (state.panelOpen) renderPanel();
+  }
+
+  code.value = store(draftKey) ?? "";
+  editor.addEventListener("input", () => store(draftKey, editor.value));
   editor.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
@@ -44,10 +62,11 @@ export function createQueryView(ui) {
   });
 
   function setSql(sql, { savedId = null, name = null } = {}) {
-    editor.value = sql;
-    store(DRAFT_KEY, sql);
+    code.value = sql;
+    store(draftKey, sql);
     state.savedId = savedId;
-    savedLabel.textContent = name ? `· ${name}` : "";
+    savedLabel.textContent = name ?? "";
+    ui.setTitle?.(name);
   }
 
   async function runEditor({ byAgent = false } = {}) {
@@ -60,8 +79,10 @@ export function createQueryView(ui) {
     try {
       state.last = { sql, result: await lake.runSql(sql), byAgent };
       if (changesCatalog(sql)) ui.refreshTree();
+      if (!byAgent) ui.log?.(`Ran a query: ${state.last.result.rows.length.toLocaleString()} rows in ${state.last.result.elapsedMs} ms`, { detail: firstLine(sql) });
     } catch (err) {
       state.last = { sql, error: err.message, byAgent };
+      if (!byAgent) ui.log?.("A query failed", { detail: err.message.split("\n")[0], error: true });
     } finally {
       state.running = false;
       runBtn.disabled = false;
@@ -97,7 +118,7 @@ export function createQueryView(ui) {
     if (!name) {
       const v = await formDialog({
         title: state.savedId ? "Update saved query" : "Save query",
-        fields: [{ name: "name", label: "Name", required: true, value: savedLabel.textContent.replace(/^· /, "") }],
+        fields: [{ name: "name", label: "Name", required: true, value: savedLabel.textContent }],
         submit: "Save",
       });
       if (!v) return;
@@ -108,7 +129,8 @@ export function createQueryView(ui) {
       : await lake.saveQuery(name, sql);
     setSql(sql, { savedId: saved.id, name });
     toast(`Saved “${name}”`);
-    if (state.panel === "saved") renderPanel();
+    if (state.panel === "saved" && state.panelOpen) renderPanel();
+    ui.refreshTree();
     return saved;
   }
 
@@ -120,7 +142,7 @@ export function createQueryView(ui) {
       store("pond.queryPanel", key);
       renderPanelTabs();
       renderPanel();
-    }, "query-panel");
+    }, panelId);
   }
 
   let panelToken = 0;
@@ -135,12 +157,13 @@ export function createQueryView(ui) {
         if (t !== panelToken) return;
         panelBody.replaceChildren(...(queries.length ? queries.map((sq) => h("div", { class: "panel-item" },
           h("button", { class: "panel-open", title: sq.query_text, onclick: () => setSql(sq.query_text, { savedId: sq.id, name: sq.display_name }) },
-            h("b", {}, sq.display_name), h("code", {}, sq.query_text.replace(/\s+/g, " "))),
+            h("b", {}, sq.display_name), h("code", {}, firstLine(sq.query_text))),
           h("button", { class: "icon-btn small", title: "Delete", "aria-label": `Delete ${sq.display_name}`, onclick: guard(async () => {
             if (!(await confirmDialog({ title: `Delete “${sq.display_name}”?`, body: "The saved query is removed from this context." }))) return;
             await lake.deleteQuery(sq.id);
             if (state.savedId === sq.id) setSql(editor.value);
             renderPanel();
+            ui.refreshTree();
           }) }, "×"))) : [empty("No saved queries. Write one and press Save (⌘S).")]));
       } else {
         const history = await lake.queryHistory(50);
@@ -163,9 +186,13 @@ export function createQueryView(ui) {
   return {
     el,
     show() {
-      renderPanel();
-      editor.focus();
+      if (state.panelOpen) renderPanel();
+      code.focus();
     },
+    activate() {
+      code.focus();
+    },
+    savedId: () => state.savedId,
     open(sql) {
       setSql(sql);
       ui.navigate("query");

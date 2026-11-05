@@ -104,7 +104,8 @@ export function createGraphView(ui) {
   const status = h("div", { class: "graph-status" });
   const toolbar = h("div", { class: "graph-toolbar" });
   const panelTabs = h("div", { class: "panel-tabs", role: "tablist" });
-  const panelBody = h("div", { class: "panel-body graph-panel-body", id: "graph-panel", role: "tabpanel" });
+  const uid = ui.uid ?? "main";
+  const panelBody = h("div", { class: "panel-body graph-panel-body", id: `graph-panel-${uid}`, role: "tabpanel" });
   const main = h("div", { class: "graph-main" }, toolbar, status, h("div", { class: "graph-canvas-wrap" }, stage, tableWrap, legend));
   const panel = h("aside", { class: "query-panel graph-panel" }, panelTabs, panelBody);
   const el = h("section", { class: "view graph-view", "aria-label": "Graph" }, main, panel);
@@ -117,7 +118,7 @@ export function createGraphView(ui) {
     const problem = G.validateDefinition(def);
     if (problem) throw new Error(problem);
     const norm = G.normalize(def);
-    if (norm.name && location.hash !== `#/graph/${encodeURIComponent(norm.name)}`) history.replaceState(null, "", `#/graph/${encodeURIComponent(norm.name)}`);
+    ui.setRoute?.(norm.name ? [norm.name] : []);
     teardown();
     // A newer open() (the user switching graphs, or an agent) makes this one stale: it
     // checks after every await and stops before touching the newer graph.
@@ -643,7 +644,7 @@ export function createGraphView(ui) {
     const colorOptions = [["none", "No colour"], ...Object.entries(GROUPINGS).filter(([, m]) => !m.directed || directed).map(([k, m]) => [k, m.label]),
       ...nodeAttributes().map((a) => [`attr:${a}`, `Column: ${a}`])];
     const nodeOptions = s.graph ? s.graph.nodes().slice(0, 2000).map((n) => h("option", { value: s.graph.getNodeAttribute(n, "label") })) : [];
-    const search = h("input", { class: "input graph-search", type: "search", placeholder: "Find node…", list: "graph-nodes", "aria-label": "Find node" });
+    const search = h("input", { class: "input graph-search", type: "search", placeholder: "Find node…", list: `graph-nodes-${uid}`, "aria-label": "Find node" });
     search.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
       const key = findNode(search.value.trim(), { fuzzy: true });
@@ -672,7 +673,7 @@ export function createGraphView(ui) {
           renderPanel();
         }),
         search,
-        h("datalist", { id: "graph-nodes" }, nodeOptions),
+        h("datalist", { id: `graph-nodes-${uid}` }, nodeOptions),
       ],
     );
     renderStatus();
@@ -752,7 +753,7 @@ export function createGraphView(ui) {
     syncTabs(panelTabs, [["node", "Node"], ["path", "Path"], ["stats", "Stats"]], s.panel, (key) => {
       s.panel = key;
       renderPanel();
-    }, "graph-panel");
+    }, `graph-panel-${uid}`);
   }
 
   async function renderPanel() {
@@ -827,8 +828,8 @@ export function createGraphView(ui) {
   const pathForm = { from: "", to: "", fromKey: null, toKey: null };
 
   function renderPathPanel() {
-    const from = h("input", { class: "input", list: "graph-nodes", value: pathForm.from, placeholder: "From node", "aria-label": "From node" });
-    const to = h("input", { class: "input", list: "graph-nodes", value: pathForm.to, placeholder: "To node", "aria-label": "To node" });
+    const from = h("input", { class: "input", list: `graph-nodes-${uid}`, value: pathForm.from, placeholder: "From node", "aria-label": "From node" });
+    const to = h("input", { class: "input", list: `graph-nodes-${uid}`, value: pathForm.to, placeholder: "To node", "aria-label": "To node" });
     const useWeights = h("input", { type: "checkbox", checked: true });
     // In overview mode an unknown id goes to the SQL search rather than a fuzzy label match.
     const resolve = (text, key, typed) => (key && text === typed && s.graph?.hasNode(key) ? key : null)
@@ -1032,8 +1033,6 @@ export function createGraphView(ui) {
   }
 
   async function openAdhoc(def, opts) {
-    history.replaceState(null, "", "#/graph");
-    if (ui.state.route.view !== "graph") ui.navigate("graph");
     return open(G.normalize({ ...def, name: def.name ?? null }), opts);
   }
 
@@ -1083,12 +1082,15 @@ export function createGraphView(ui) {
       : { node: g.getNodeAttribute(key, "raw"), label: label(key), neighbors: pick(g.neighbors(key)), degree: g.degree(key) };
   }
 
-  // Keep canvas colours in step with the OS theme.
-  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  // Keep canvas colours in step with the theme, whether the OS or the page changes it.
+  const onTheme = () => {
     if (!s.graph) return;
     restyle();
     s.sigma?.setSetting("labelColor", { color: s.theme.ink });
-  });
+  };
+  const media = matchMedia("(prefers-color-scheme: dark)");
+  media.addEventListener("change", onTheme);
+  document.addEventListener("pond:theme", onTheme);
 
   return {
     el,
@@ -1104,6 +1106,17 @@ export function createGraphView(ui) {
       }
       render();
       s.sigma?.refresh();
+    },
+    // The tab was hidden, so the canvas had no size: let sigma measure it again.
+    activate() {
+      s.sigma?.resize?.();
+      s.sigma?.refresh();
+    },
+    dispose() {
+      ++loadSeq;
+      teardown();
+      media.removeEventListener("change", onTheme);
+      document.removeEventListener("pond:theme", onTheme);
     },
     open,
     openAdhoc,

@@ -88,7 +88,7 @@ test("overwriting tools ask first, and stop when the user declines", async () =>
   const decline = { requestUserInteraction: async () => false };
   const realFetch = globalThis.fetch;
   let wrote = false;
-  globalThis.fetch = async (path, init = {}) => {
+  globalThis.fetch = async (_path, init = {}) => {
     if ((init.method ?? "GET") === "PUT") wrote = true;
     return new Response(JSON.stringify({ path: "/a.txt", file_size: 3 }), { status: 200 }); // the file exists
   };

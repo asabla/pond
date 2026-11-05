@@ -1,5 +1,6 @@
 // @ts-check
 // Jobs: Python/PySpark scripts run in Spark containers on this context's network.
+import { createCodeEditor } from "../editor.js";
 import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, fmtTime, fmtDuration } from "../dom.js";
 
 const POLL_MS = 2000;
@@ -126,7 +127,8 @@ export function createJobsView(ui) {
     const source = task?.python_file ? await lake.exportWorkspace(task.python_file).catch(() => null) : null;
     if (!live()) return;
     const name = job.settings?.name ?? `Job ${id}`;
-    const editor = h("textarea", { class: "editor code-editor", spellcheck: "false", "aria-label": "Script" }, source ?? "");
+    const code = createCodeEditor({ language: "python", value: source ?? "", label: "Script", className: "script-editor" });
+    const editor = code.input;
     const params = h("input", { class: "input mono", value: joinParams(task?.parameters), placeholder: "Arguments passed to the script", "aria-label": "Parameters" });
     // Saving writes the editor over the script, so only offer it when the script loaded.
     const editable = Boolean(task?.python_file) && source != null;
@@ -153,7 +155,7 @@ export function createJobsView(ui) {
         }, "primary"),
       ]),
       h("p", { class: "context-dir mono" }, task?.python_file ?? "No Python task"),
-      section("Script", null, source == null ? errorBox("Could not load the script from the workspace.") : editor),
+      section("Script", null, source == null ? errorBox("Could not load the script from the workspace.") : code.el),
       section("Parameters", null, params),
       runsBox,
     );
@@ -250,6 +252,12 @@ export function createJobsView(ui) {
   return {
     el,
     show,
+    // Polling stops while the tab is hidden; coming back picks up where the runs are now.
+    activate: (parts) => show(parts),
+    dispose() {
+      ++token;
+      clearTimeout(pollTimer);
+    },
     snapshot: () => ({ jobs_view: current }),
   };
 }

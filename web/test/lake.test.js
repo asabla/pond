@@ -130,3 +130,21 @@ test("importWorkspace sends UTF-8 source as base64", async () => {
   assert.equal(Buffer.from(body.content, "base64").toString("utf8"), "print('hej då')");
   assert.equal(calls[0].body.path, "/Shared/pond");
 });
+
+test("a client for another context prefixes its requests with that context's path", async () => {
+  const { createLake } = await import("../static/lake.js");
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (path) => {
+    seen.push(path);
+    return new Response(JSON.stringify({ catalogs: [{ name: "c" }] }), { status: 200 });
+  };
+  try {
+    const other = createLake("/ctx/shop-1");
+    assert.deepEqual((await other.listCatalogs()).map((c) => c.name), ["c"]);
+    await other.config();
+    assert.deepEqual(seen, ["/ctx/shop-1/api/2.1/unity-catalog/catalogs", "/ctx/shop-1/pond/config"]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

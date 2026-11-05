@@ -27,6 +27,8 @@ export function store(key, value) {
 }
 
 export function toast(text, kind) {
+  // The workbench logs these in its activity rail.
+  globalThis.document?.dispatchEvent(new CustomEvent("pond:toast", { detail: { text: String(text), kind } }));
   const stack = $("#toasts");
   stack.append(h("div", { class: `toast ${kind ?? ""}` }, text));
   while (stack.children.length > 3) stack.firstElementChild.remove();
@@ -37,7 +39,20 @@ export const loading = (text) => h("div", { class: "empty" }, h("span", { class:
 export const empty = (...children) => h("div", { class: "empty" }, ...children);
 export const errorBox = (message) => h("div", { class: "error" }, message);
 
-export const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString() : "—");
+/**
+ * A short, unambiguous time: the clock for today, the day and month otherwise, and the
+ * year only when it isn't this one. Month names avoid the 05/11 day-or-month question.
+ * @param {number | string | null | undefined} ms
+ */
+export function fmtTime(ms) {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  const now = new Date();
+  const clock = { hour: "2-digit", minute: "2-digit" };
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], /** @type {any} */ (clock));
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleString([], /** @type {any} */ ({ day: "numeric", month: "short", ...(sameYear ? clock : { year: "numeric" }) }));
+}
 export function fmtBytes(n) {
   if (n == null) return "";
   const units = ["B", "KB", "MB", "GB"];
@@ -60,12 +75,15 @@ export function grid({ columns, rows }, { max = 1000 } = {}) {
     h("table", { class: "grid" },
       h("thead", {}, h("tr", {},
         h("th", { class: "rownum" }, "#"),
-        columns.map((c) => h("th", { title: `${c.name} ${c.type ?? ""}` }, c.name, h("small", {}, (c.type || "").toLowerCase()))))),
+        columns.map((c, j) => h("th", { class: numeric[j] ? "num" : null, title: `${c.name} ${c.type ?? ""}` }, c.name, h("small", {}, (c.type || "").toLowerCase()))),
+        // Takes the spare width, so columns stay as wide as their content.
+        h("th", { class: "fill", "aria-hidden": "true" }))),
       h("tbody", {}, rows.slice(0, max).map((row, i) => h("tr", {},
         h("td", { class: "rownum" }, String(i + 1)),
         row.map((v, j) => v === null
           ? h("td", { class: "null" }, "null")
-          : h("td", { class: numeric[j] ? "num" : null, title: String(v).length > 40 ? String(v) : null }, String(v))))))));
+          : h("td", { class: numeric[j] ? "num" : null, title: String(v).length > 40 ? String(v) : null }, String(v))),
+        h("td", { class: "fill", "aria-hidden": "true" }))))));
 }
 
 // Simple key/value table for lists of objects: cols = [[label, row => node|string], ...].

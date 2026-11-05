@@ -44,6 +44,16 @@ async function askUser(client, fn) {
 // Dropping objects, deleting files and resetting the lake still ask every time.
 let trusted = false;
 
+// The activity rail shows and changes the same setting.
+export const agentTrust = {
+  get: () => trusted,
+  /** @param {boolean} value */
+  set(value) {
+    trusted = value;
+    globalThis.document?.dispatchEvent(new CustomEvent("pond:trust"));
+  },
+};
+
 // Asks the user before an agent replaces or deletes something.
 const confirmAgent = (client, title, body, confirm = "Allow") => trusted ? Promise.resolve() : askUser(client, async () => {
   const v = await formDialog({
@@ -53,7 +63,7 @@ const confirmAgent = (client, title, body, confirm = "Allow") => trusted ? Promi
     submit: confirm,
     fields: [{ name: "trust", type: "checkbox", label: "Don't ask again until this page is reloaded" }],
   });
-  if (v?.trust) trusted = true;
+  if (v?.trust) agentTrust.set(true);
   return v !== null;
 });
 
