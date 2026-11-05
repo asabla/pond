@@ -44,6 +44,38 @@ do not establish screen-reader certification, large-lake count performance, or
 live compatibility with the external agent clients. Client formats follow the
 [official setup examples](https://developers.openai.com/learn/docs-mcp).
 
+### Graph follow-up
+
+The graph comments are addressed on the same workspace-layout branch:
+
+- Removed the permanent instruction paragraph. Find stays visible; Display holds
+  size, colour, labels and layout; Graph holds definition actions.
+- Details starts closed, opens on selection and can be closed with its button
+  or Escape. On narrow screens it is a bottom panel. Closing it restores focus.
+- The collapsible legend explains computed communities, shows example members
+  and node counts, and highlights a selected group. Node properties such as type
+  provide domain labels when supplied by the node query.
+- A relationship table and inspector read original SQL rows, including multiple
+  rows between the same nodes. Type, IDs and other properties stay visible.
+  The table mapper retains properties and offers a relationship type column.
+  Node search presents duplicate names with their IDs instead of choosing one.
+- Relationship search runs in SQL before the 1,000-row preview limit. More rows
+  are disclosed; export includes shown rows, and Open in SQL removes this preview
+  limit. The SQL service's own result limits still apply. Graph analytics retain
+  their combined-connection model; this is not multigraph analytics.
+
+Verification used synthetic people, films and separate ACTED_IN/DIRECTED rows
+in the isolated sample lake. Built-in Browser checks covered node properties,
+duplicate names, connection clicks, property search, keyboard row selection,
+graph/table redraw, selected relationship labels, display-control names and
+focus, legend highlighting, inspector collapse, themes and a 320-pixel layout.
+Live SQL checks also found a property match beyond the first 1,000 rows and
+verified that a table containing only source and target still maps correctly.
+The 67 JavaScript tests, Deno check/lint, graph-engine and web race tests passed.
+Evidence is retained locally under `dist/graph-review/evidence/` (untracked).
+This does not establish screen-reader certification or large-graph interaction
+performance. The user's lake was not changed.
+
 | Findings | Implemented change |
 | --- | --- |
 | U1–U3 | Persistent query, job and script drafts, saved-query identity, dirty state, remote-change checks, Save as/export, and recovery of the last 20 closed tabs. Query history opens another tab. |

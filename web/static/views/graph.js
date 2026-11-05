@@ -2,8 +2,9 @@
 // Graph: network analytics over lake tables. Draws a graph defined by SQL with sigma.js,
 // computes metrics with graphology, and finds paths. Graphs too big to load open on their
 // best-connected nodes and grow by expanding nodes; paths then come from SQL.
-import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, guard, syncTabs } from "../dom.js";
+import { h, table, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, guard, syncTabs } from "../dom.js";
 import * as G from "../graph.js";
+import { relationshipsSql, relationshipLabel, propertyText, distanceToConnection } from "../graph-inspect.js";
 
 // replaceChildren, skipping the null and false a conditional child leaves behind.
 const put = (el, ...children) => {
@@ -71,6 +72,7 @@ export function createGraphView(ui) {
     return result;
   };
   let loadSeq = 0;
+  let relationshipSeq = 0;
   const s = {
     def: null, // the graph definition being shown
     mode: null, // "full" | "overview"
@@ -85,6 +87,21 @@ export function createGraphView(ui) {
     size: store("pond.graphSize") ?? "degree",
     color: store("pond.graphColor") ?? "community",
     selected: null,
+    selectedEdge: null,
+    relationship: null,
+    relationshipData: null,
+    relationshipScope: {},
+    relationshipSearch: "",
+    relationshipLoading: false,
+    relationshipError: null,
+    edgeColumns: [],
+    panelOpen: false,
+    displayOpen: false,
+    menuOpen: false,
+    search: "",
+    tableKind: "nodes",
+    groupFocus: null,
+    legendMoreOpen: false,
     hovered: null,
     path: null, // { nodes: [...keys], edges: Set }
     panel: "node",
@@ -95,9 +112,9 @@ export function createGraphView(ui) {
     saved: [],
   };
 
-  const stage = h("div", { class: "graph-stage", role: "img", "aria-label": "Network view. Use Find node for details, or Show table for metrics." });
+  const stage = h("div", { class: "graph-stage", role: "img", "aria-label": "Network view. Find nodes by name or ID. Nodes and Relationships tables provide keyboard access to details." });
   const tableWrap = h("div", { class: "graph-table", hidden: true });
-  const legend = h("div", { class: "graph-legend", "aria-label": "Legend" });
+  const legend = h("details", { class: "graph-legend", "aria-label": "Graph colour legend", open: true });
   const status = h("div", { class: "graph-status" });
   const announcement = h("p", { class: "sr-only", role: "status" });
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -105,9 +122,27 @@ export function createGraphView(ui) {
   const panelTabs = h("div", { class: "panel-tabs", role: "tablist" });
   const uid = ui.uid ?? "main";
   const panelBody = h("div", { class: "panel-body graph-panel-body", id: `graph-panel-${uid}`, role: "tabpanel" });
-  const main = h("div", { class: "graph-main" }, toolbar, h("p", { class: "graph-help" }, "Use Find node and Enter to inspect a node. Enter its ID when names repeat. Show table lists metrics; the Node panel has neighbour and expansion controls."), status, h("div", { class: "graph-canvas-wrap" }, stage, tableWrap, legend));
-  const panel = h("aside", { class: "query-panel graph-panel" }, panelTabs, panelBody);
+  const main = h("div", { class: "graph-main" }, toolbar, status, h("div", { class: "graph-canvas-wrap" }, stage, tableWrap, legend));
+  const panel = h("aside", { class: "query-panel graph-panel", id: `graph-inspector-${uid}`, "aria-label": "Graph details", hidden: true },
+    h("div", { class: "graph-panel-head" }, h("b", {}, "Details"), h("button", { class: "btn ghost small", "aria-label": "Close graph details", onclick: () => togglePanel(false) }, "Close")), panelTabs, panelBody);
   const el = h("section", { class: "view graph-view", "aria-label": "Graph" }, main, panel, announcement);
+  el.addEventListener("click", (event) => {
+    let changed = false;
+    if (s.displayOpen && !toolbar.querySelector(".graph-display")?.contains(event.target)) { s.displayOpen = false; changed = true; }
+    if (s.menuOpen && !toolbar.querySelector(".graph-menu")?.contains(event.target)) { s.menuOpen = false; changed = true; }
+    if (changed) renderToolbar();
+  });
+  el.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (s.displayOpen || s.menuOpen) {
+      event.preventDefault();
+      const key = s.displayOpen ? "graph-display" : "graph-menu";
+      s.displayOpen = false; s.menuOpen = false;
+      renderToolbar();
+      toolbar.querySelector(`[data-focus-key="${key}"]`)?.focus();
+    }
+    else if (s.panelOpen) { event.preventDefault(); togglePanel(false); }
+  });
 
   /* ---------- Loading a graph ---------- */
 
@@ -125,7 +160,8 @@ export function createGraphView(ui) {
     const live = () => {
       if (load !== loadSeq) throw STALE;
     };
-    Object.assign(s, { def: norm, graph: null, mode: null, metrics: {}, groups: {}, diameter: null, selected: null, path: null, error: null, loading: "Loading graph…", byAgent });
+    Object.assign(s, { def: norm, graph: null, mode: null, metrics: {}, groups: {}, diameter: null, selected: null, selectedEdge: null, relationship: null, relationshipData: null, relationshipScope: {}, relationshipSearch: "", relationshipError: null, relationshipLoading: false, groupFocus: null, path: null, error: null, loading: "Loading graph…", byAgent });
+    ++relationshipSeq;
     render();
     try {
       const { Graph } = await loadLibs();
@@ -133,6 +169,7 @@ export function createGraphView(ui) {
       const head = await runSql(G.columnsSql(norm));
       live();
       if (head.columns.length < 2) throw new Error("The edge query needs at least two columns: source and target.");
+      s.edgeColumns = head.columns;
       s.columns = {
         source: head.columns[0].name,
         target: head.columns[1].name,
@@ -312,6 +349,7 @@ export function createGraphView(ui) {
       s.path = { nodes: keys, edges, from, to, hops: keys.length - 1, weight: total };
     }
     s.panel = "path";
+    togglePanel(true);
     refresh();
     if (keys) fitNodes(keys);
     renderToolbar();
@@ -347,7 +385,9 @@ export function createGraphView(ui) {
     await restyle();
     render();
     s.sigma = new Sigma(s.graph, stage, {
-      renderEdgeLabels: false,
+      renderEdgeLabels: true,
+      edgeLabelColor: { color: s.theme.ink },
+      enableEdgeEvents: true,
       defaultEdgeType: s.def.directed ? "arrow" : "line",
       labelColor: { color: s.theme.ink },
       allowInvalidContainer: true,
@@ -364,11 +404,27 @@ export function createGraphView(ui) {
     s.sigma.on("enterNode", ({ node }) => ((s.hovered = node), s.sigma.refresh({ skipIndexation: true })));
     s.sigma.on("leaveNode", () => ((s.hovered = null), s.sigma.refresh({ skipIndexation: true })));
     s.sigma.on("clickNode", ({ node }) => select(node));
+    s.sigma.on("clickEdge", ({ edge }) => inspectEdge(edge));
     s.sigma.on("doubleClickNode", (e) => {
       e.preventSigmaDefault();
       expand(e.node).catch((err) => toast(err.message, "err"));
     });
-    s.sigma.on("clickStage", () => select(null));
+    s.sigma.on("clickStage", ({ event }) => {
+      // Thin connections need a larger click target than their painted pixels.
+      let nearest = null, distance = 7;
+      const positions = new Map();
+      const point = (key) => {
+        if (!positions.has(key)) positions.set(key, s.sigma.framedGraphToViewport(s.sigma.getNodeDisplayData(key)));
+        return positions.get(key);
+      };
+      s.graph.forEachEdge((edge, _attrs, from, to) => {
+        if (s.sigma.getEdgeDisplayData(edge)?.hidden) return;
+        const d = distanceToConnection(event, point(from), point(to));
+        if (d < distance) { nearest = edge; distance = d; }
+      });
+      if (nearest) inspectEdge(nearest);
+      else select(null);
+    });
     startLayout(LAYOUT_MS(s.graph.order));
   }
 
@@ -415,6 +471,7 @@ export function createGraphView(ui) {
     if (s.color !== "none") {
       try {
         const grp = await grouping(s.color);
+        s.groupValues = grp.byNode;
         // Numbers with few distinct values (a team id, a year) read better as categories.
         if (s.color.startsWith("attr:") && G.isNumeric(grp.byNode) && new Set(Object.values(grp.byNode)).size > G.SLOTS) {
           const { byNode, min, max } = G.scale(grp.byNode);
@@ -439,6 +496,9 @@ export function createGraphView(ui) {
     const t = s.theme;
     const focus = s.hovered ?? s.selected;
     const res = { ...data };
+    if (s.selectedEdge && s.graph.hasEdge(s.selectedEdge)) {
+      return s.graph.hasExtremity(s.selectedEdge, node) ? { ...res, highlighted: true, zIndex: 2, forceLabel: true } : { ...res, color: t.line, label: "", zIndex: 0 };
+    }
     if (s.path?.nodes.length) {
       if (s.path.nodes.includes(node)) return { ...res, highlighted: true, zIndex: 2, forceLabel: true };
       return { ...res, color: t.line, label: "", zIndex: 0 };
@@ -448,18 +508,21 @@ export function createGraphView(ui) {
       if (s.graph.areNeighbors(node, focus)) return { ...res, zIndex: 1 };
       return { ...res, color: t.line, label: "", zIndex: 0 };
     }
+    if (s.groupFocus != null && String(s.groupValues?.[node] ?? "∅") !== s.groupFocus) return { ...res, color: t.line, label: "" };
     return res;
   }
 
   function edgeReducer(edge, data) {
     const t = s.theme;
     const focus = s.hovered ?? s.selected;
+    if (s.selectedEdge) return edge === s.selectedEdge ? { ...data, color: t.accent, size: 3, zIndex: 2, label: s.relationship ? relationshipLabel(s.relationship.columns, s.relationship.row) : "Inspect relationships", forceLabel: true } : { ...data, color: t.line, size: 0.3, label: "" };
     if (s.path?.nodes.length) {
       return s.path.edges?.has(edge) ? { ...data, color: t.accent, size: 2.5, zIndex: 2 } : { ...data, hidden: false, color: t.line, size: 0.3 };
     }
     if (focus && s.graph.hasNode(focus)) {
       return s.graph.hasExtremity(edge, focus) ? { ...data, color: t.ink3, size: 1.2, zIndex: 1 } : { ...data, hidden: true };
     }
+    if (s.groupFocus != null && s.graph.extremities(edge).some((node) => String(s.groupValues?.[node] ?? "∅") !== s.groupFocus)) return { ...data, color: t.line, size: 0.3 };
     return data;
   }
 
@@ -497,25 +560,107 @@ export function createGraphView(ui) {
 
   // Moves the camera so all the given nodes are in view (ratio 1 shows the whole graph).
   function fitNodes(keys) {
+    stopLayout();
     const pts = keys.map((k) => s.sigma?.getNodeDisplayData(k)).filter(Boolean);
     if (!pts.length) return;
     const xs = pts.map((d) => d.x);
     const ys = pts.map((d) => d.y);
     const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-    const ratio = Math.min(1, Math.max(0.2, Math.max(x1 - x0, y1 - y0) * 1.4));
-    s.sigma.getCamera().animate({ x: (x0 + x1) / 2, y: (y0 + y1) / 2, ratio }, { duration: motion.matches ? 0 : 500 });
+    const camera = { x: (x0 + x1) / 2, y: (y0 + y1) / 2, angle: 0, ratio: 1 };
+    const projected = pts.map((point) => s.sigma.framedGraphToViewport(point, { cameraState: camera }));
+    const { width, height } = s.sigma.getDimensions();
+    const span = (axis) => Math.max(...projected.map((p) => p[axis])) - Math.min(...projected.map((p) => p[axis]));
+    camera.ratio = Math.max(0.2, span("x") / Math.max(1, width - 120), span("y") / Math.max(1, height - 120)) * 1.1;
+    s.sigma.getCamera().animate(camera, { duration: motion.matches ? 0 : 500 });
   }
 
   function select(key, { center = false } = {}) {
+    s.selectedEdge = null;
+    s.relationship = null;
     s.selected = key && s.graph?.hasNode(key) ? key : null;
     announcement.textContent = s.selected ? `Selected ${s.graph.getNodeAttribute(s.selected, "label")}. Details and neighbours are in the Node panel.` : "No node selected.";
     if (s.selected) {
+      stopLayout();
       s.panel = "node";
+      togglePanel(true);
       if (center) focusNode(s.selected);
     }
     refresh();
     renderPanel();
     if (s.showTable) renderTable();
+  }
+
+  function togglePanel(open = !s.panelOpen) {
+    const hadFocus = panel.contains(document.activeElement);
+    s.panelOpen = open;
+    panel.hidden = !open;
+    renderToolbar();
+    if (!open && hadFocus) toolbar.querySelector('[data-focus-key="graph-details"]')?.focus();
+    requestAnimationFrame(() => { s.sigma?.resize(); s.sigma?.refresh(); });
+  }
+
+  async function loadRelationships(scope = s.relationshipScope) {
+    s.relationshipScope = scope;
+    s.relationshipData = null;
+    s.relationshipError = null;
+    s.relationshipLoading = true;
+    const seq = ++relationshipSeq;
+    const graph = s.graph;
+    const sql = relationshipsSql(s.def, s.edgeColumns, { ...scope, search: s.relationshipSearch });
+    if (s.showTable && s.tableKind === "relationships") renderRelationshipTable();
+    try {
+      const data = await lake.runSql(`/* pond:system */ ${sql}`);
+      if (data.truncated) throw new Error("Relationship rows exceed the response limit. Narrow the search or open them in SQL.");
+      if (seq !== relationshipSeq || graph !== s.graph) return;
+      s.relationshipData = data;
+    } catch (err) {
+      if (seq !== relationshipSeq || graph !== s.graph) return;
+      s.relationshipError = err.message;
+    } finally {
+      if (seq === relationshipSeq && graph === s.graph) {
+        s.relationshipLoading = false;
+        if (s.showTable && s.tableKind === "relationships") renderRelationshipTable();
+        if (s.panel === "relationship" && !s.relationship) renderPanel();
+      }
+    }
+  }
+
+  function showRelationships(scope = {}) {
+    s.relationshipSearch = "";
+    s.tableKind = "relationships";
+    s.showTable = true;
+    s.relationshipScope = scope;
+    loadRelationships(scope);
+    renderView();
+  }
+
+  function inspectRelationship(columns, row) {
+    stopLayout();
+    s.relationship = { columns, row };
+    s.selected = null;
+    const [a, b] = row.slice(0, 2).map(G.keyOf);
+    s.selectedEdge = s.graph.hasNode(a) && s.graph.hasNode(b) ? s.graph.edge(a, b) ?? null : null;
+    s.panel = "relationship";
+    togglePanel(true);
+    announcement.textContent = `Selected ${relationshipLabel(columns, row)}: ${label(a)} to ${label(b)}.`;
+    renderPanel();
+    panelBody.tabIndex = -1;
+    panelBody.focus({ preventScroll: true });
+    refresh();
+  }
+
+  function inspectEdge(edge) {
+    stopLayout();
+    s.selectedEdge = edge;
+    s.selected = null;
+    s.relationship = null;
+    s.panel = "relationship";
+    togglePanel(true);
+    const pair = s.graph.extremities(edge).map((key) => rawId(key));
+    s.relationshipSearch = "";
+    loadRelationships({ pair });
+    renderPanel();
+    refresh();
   }
 
   /* ---------- Rendering ---------- */
@@ -532,62 +677,77 @@ export function createGraphView(ui) {
 
   function select_(label, value, options, onchange) {
     return h("label", { class: "graph-select" }, h("span", {}, label),
-      h("select", { onchange: (e) => onchange(e.target.value) }, options.map(([v, l]) => h("option", { value: v, selected: v === value }, l))));
+      h("select", { "aria-label": label, onchange: async (e) => {
+        const field = e.currentTarget;
+        await onchange(field.value);
+        if (field.isConnected && document.activeElement === document.body) field.focus({ preventScroll: true });
+      } }, options.map(([v, l]) => h("option", { value: v, selected: v === value }, l))));
   }
 
   function renderToolbar() {
     const directed = s.def?.directed;
     const sizeOptions = [["none", "Same size"], ...Object.entries(METRICS).filter(([, m]) => !m.directed || directed).map(([k, m]) => [k, m.label])];
     const colorOptions = [["none", "No colour"], ...Object.entries(GROUPINGS).filter(([, m]) => !m.directed || directed).map(([k, m]) => [k, m.label]),
-      ...nodeAttributes().map((a) => [`attr:${a}`, `Column: ${a}`])];
-    const nodeOptions = s.graph ? s.graph.nodes().slice(0, 2000).map((n) => h("option", { value: s.graph.getNodeAttribute(n, "label") })) : [];
-    const search = h("input", { class: "input graph-search", type: "search", placeholder: "Find node…", list: `graph-nodes-${uid}`, "aria-label": "Find node" });
-    search.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter") return;
-      const key = findNode(search.value.trim(), { fuzzy: true });
-      if (key) select(key, { center: true });
-      else toast(`No node “${search.value}” in the loaded graph.`, "err");
-    });
-    put(toolbar,
-      h("select", { class: "graph-pick", "aria-label": "Saved graphs", onchange: (e) => e.target.value && ui.navigate("graph", e.target.value) },
-        h("option", { value: "", selected: !s.def?.name }, s.def && !s.def.name ? "Unsaved graph" : "Saved graphs…"),
-        s.saved.map((g) => h("option", { value: g.name, selected: g.name === s.def?.name }, g.name))),
-      h("button", { class: "btn", onclick: guard(() => newGraph()) }, "New graph"),
-      s.def && h("button", { class: "btn", onclick: guard(() => saveDialog()) }, s.def.name ? "Edit" : "Save…"),
-      s.def && h("button", { class: "btn ghost", onclick: () => download(`${s.def.name ?? "graph"}.pond.json`, JSON.stringify({ graphs: [{ ...s.def, name: s.def.name ?? "Graph" }] }, null, 2), "application/json") }, "Export definition"),
-      s.graph && [
-        h("span", { class: "graph-sep" }),
-        select_("Size", s.size, sizeOptions, async (v) => {
-          if (METRICS[v]?.heavy && s.graph.order > HEAVY_NODES && !(await confirmDialog({ title: `Compute ${METRICS[v].label.toLowerCase()}?`, body: `It takes a while on ${s.graph.order.toLocaleString()} nodes.`, confirm: "Compute" }))) return renderToolbar();
+      ...nodeAttributes().map((a) => [`attr:${a}`, `Property: ${a}`])];
+    const nodeOptions = s.graph ? s.graph.nodes().slice(0, 2000).map((n) => h("option", { value: n }, s.graph.getNodeAttribute(n, "label"))) : [];
+    const search = h("input", { class: "input graph-search", type: "search", value: s.search, placeholder: "Node name or ID", list: `graph-nodes-${uid}`, "aria-label": "Find node", oninput: () => { s.search = search.value; } });
+    const find = () => {
+      const text = search.value.trim();
+      if (!text) return search.focus();
+      const exact = s.graph.hasNode(text) ? [text] : s.graph.nodes().filter((n) => String(label(n)).toLowerCase() === text.toLowerCase());
+      const matches = exact.length ? exact : s.graph.nodes().filter((n) => String(label(n)).toLowerCase().includes(text.toLowerCase()));
+      if (matches.length === 1) select(matches[0], { center: true });
+      else if (matches.length) {
+        s.panel = "node";
+        togglePanel(true);
+        put(panelBody, h("h2", { class: "graph-node-title" }, `${matches.length} matching nodes`),
+          h("ul", { class: "graph-search-results" }, matches.slice(0, 100).map((n) => h("li", {}, h("button", { class: "linkish", onclick: () => select(n, { center: true }) }, label(n)), h("small", {}, n)))),
+          matches.length > 100 && h("p", { class: "help" }, "Showing the first 100. Use a longer name or an exact ID."));
+      } else toast(`No node “${text}” in the loaded graph.`, "err");
+    };
+    search.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); find(); } });
+    const options = h("div", { class: "graph-display" },
+      h("button", { class: "btn", "data-focus-key": "graph-display", "aria-expanded": String(s.displayOpen), "aria-controls": `graph-display-${uid}`, onclick: (event) => { event.stopPropagation(); s.displayOpen = !s.displayOpen; s.menuOpen = false; renderToolbar(); } }, "Display"),
+      h("div", { class: "graph-display-options", id: `graph-display-${uid}`, role: "group", "aria-label": "Graph display settings", hidden: !s.displayOpen },
+        select_("Node size", s.size, sizeOptions, async (v) => {
+          if (METRICS[v]?.heavy && s.graph.order > HEAVY_NODES && !(await confirmDialog({ title: `Compute ${METRICS[v].label.toLowerCase()}?`, body: `This uses ${s.graph.order.toLocaleString()} nodes.`, confirm: "Compute" }))) return renderToolbar();
           s.size = v;
           store("pond.graphSize", v);
           await busy(restyle);
           if (s.showTable) renderTable();
         }),
-        select_("Colour", s.color, colorOptions, async (v) => {
+        select_("Node colour", s.color, colorOptions, async (v) => {
           s.color = v;
+          s.groupFocus = null;
           store("pond.graphColor", v);
           await busy(restyle);
           renderPanel();
         }),
-        search,
-        h("datalist", { id: `graph-nodes-${uid}` }, nodeOptions),
-      ],
-    );
+        h("button", { class: "btn ghost small", "aria-label": "Node labels", "aria-pressed": String(s.labels), onclick: () => {
+          s.labels = !s.labels;
+          store(LABELS_KEY, s.labels);
+          s.sigma?.setSetting("renderLabels", s.labels);
+          renderToolbar();
+        } }, "Node labels"),
+        h("button", { class: "btn ghost small", "aria-label": s.layout?.isRunning() ? "Stop layout" : "Run layout", "data-focus-key": "layout", disabled: s.showTable, onclick: () => (s.layout?.isRunning() ? stopLayout() : startLayout(LAYOUT_MS(s.graph.order), { requested: true })) }, s.layout?.isRunning() ? "Stop layout" : "Run layout")));
+    put(toolbar,
+      h("div", { class: "graph-toolbar-row" },
+        h("select", { class: "graph-pick", "aria-label": "Saved graphs", onchange: (e) => e.target.value && ui.navigate("graph", e.target.value) },
+          h("option", { value: "", selected: !s.def?.name }, s.def && !s.def.name ? "Unsaved graph" : "Saved graphs…"),
+          s.saved.map((g) => h("option", { value: g.name, selected: g.name === s.def?.name }, g.name))),
+        h("div", { class: "graph-menu" }, h("button", { class: "btn ghost", "data-focus-key": "graph-menu", "aria-expanded": String(s.menuOpen), "aria-controls": `graph-menu-${uid}`, onclick: (event) => { event.stopPropagation(); s.menuOpen = !s.menuOpen; s.displayOpen = false; renderToolbar(); } }, "Graph"), h("div", { class: "graph-menu-items", id: `graph-menu-${uid}`, "aria-label": "Graph actions", hidden: !s.menuOpen },
+          h("button", { class: "btn", onclick: guard(() => newGraph()) }, "New graph"),
+          s.def && h("button", { class: "btn", onclick: guard(() => saveDialog()) }, s.def.name ? "Edit definition" : "Save graph…"),
+          s.def && h("button", { class: "btn ghost", onclick: () => download(`${s.def.name ?? "graph"}.pond.json`, JSON.stringify({ graphs: [{ ...s.def, name: s.def.name ?? "Graph" }] }, null, 2), "application/json") }, "Export definition"))),
+        h("button", { class: "btn ghost", "data-focus-key": "graph-details", "aria-expanded": String(s.panelOpen), "aria-controls": panel.id, onclick: () => togglePanel() }, "Details")),
+      s.graph && h("div", { class: "graph-toolbar-row graph-search-row" }, search,
+        h("button", { class: "btn", onclick: find }, "Find"),
+        h("datalist", { id: `graph-nodes-${uid}` }, nodeOptions), options));
     renderStatus();
   }
 
-  // View toggles sit at the end of the status row.
   function viewControls() {
-    const running = s.layout?.isRunning();
     return h("span", { class: "graph-view-controls" },
-      h("button", { class: "btn ghost small", "aria-pressed": String(s.labels), title: "Show node labels", onclick: () => {
-        s.labels = !s.labels;
-        store(LABELS_KEY, s.labels);
-        s.sigma?.setSetting("renderLabels", s.labels);
-        renderStatus();
-      } }, "Labels"),
-      h("button", { class: "btn ghost small", "data-focus-key": "layout", disabled: s.showTable, onclick: () => (running ? stopLayout() : startLayout(LAYOUT_MS(s.graph.order), { requested: true })) }, running ? "Stop layout" : "Run layout"),
       h("button", { class: "btn ghost small", "data-focus-key": "graph-table", "aria-pressed": String(s.showTable), onclick: () => {
         s.showTable = !s.showTable;
         renderView();
@@ -610,45 +770,75 @@ export function createGraphView(ui) {
     if (!text || !s.graph) return null;
     if (s.graph.hasNode(text)) return text;
     const lower = text.toLowerCase();
-    return s.graph.findNode((_, a) => String(a.label).toLowerCase() === lower)
-      ?? (fuzzy ? s.graph.findNode((_, a) => String(a.label).toLowerCase().includes(lower)) : null)
-      ?? null;
+    const exact = s.graph.nodes().filter((n) => String(label(n)).toLowerCase() === lower);
+    if (exact.length) return exact.length === 1 ? exact[0] : null;
+    const matches = fuzzy ? s.graph.nodes().filter((n) => String(label(n)).toLowerCase().includes(lower)) : [];
+    return matches.length === 1 ? matches[0] : null;
   }
 
   function renderStatus() {
     if (!s.graph) return put(status);
     const g = s.graph;
     const parts = [
-      h("b", {}, `${g.order.toLocaleString()} nodes`), h("span", {}, `${g.size.toLocaleString()} edges`),
+      h("b", {}, `${g.order.toLocaleString()} nodes`), h("span", {}, `${g.size.toLocaleString()} connections`),
       h("span", { class: "muted" }, s.def.directed ? "directed" : "undirected"),
     ];
+    if (s.totalEdges !== g.size) parts.push(h("span", { class: "muted" }, `${s.totalEdges.toLocaleString()} relationship rows in lake`));
+    if (s.groupFocus != null) parts.push(h("span", {}, `Highlight: ${s.groupFocus}`), h("button", { class: "btn ghost small", onclick: () => { s.groupFocus = null; refresh(); renderLegend(); renderStatus(); if (s.showTable) renderTable(); } }, "Clear highlight"));
     if (s.mode === "overview") {
       parts.push(h("span", { class: "graph-note" },
         `Overview of a ${s.totalEdges.toLocaleString()}-edge graph: its ${G.OVERVIEW_SEEDS} best-connected nodes and their neighbours. Double-click a node to expand it. Metrics cover the loaded nodes; paths search the whole graph.`));
     }
     if (s.byAgent) parts.push(h("span", { class: "by-agent" }, "opened by agent"));
+    const layoutButton = toolbar.querySelector('[data-focus-key="layout"]');
+    if (layoutButton) {
+      layoutButton.textContent = s.layout?.isRunning() ? "Stop layout" : "Run layout";
+      layoutButton.setAttribute("aria-label", layoutButton.textContent);
+    }
     put(status, ...parts, viewControls());
   }
 
   function renderLegend() {
     const L = s.legend;
-    if (!L || s.showTable) return put(legend, );
+    legend.hidden = !L || s.showTable;
+    if (!L || s.showTable) return put(legend);
     const t = s.theme;
     if (L.kind === "ramp") {
-      put(legend, h("b", {}, L.title),
+      put(legend, h("summary", {}, `Node colour: ${L.title}`),
         h("div", { class: "ramp" }, t.ramp.map((c) => h("i", { style: `background:${c}` }))),
         h("div", { class: "ramp-ends" }, h("span", {}, fmt(L.min)), h("span", {}, fmt(L.max))));
       return;
     }
-    put(legend, h("b", {}, L.title),
-      h("ul", {}, L.legend.map((x) => h("li", {}, h("i", { style: `background:${t.series[x.slot]}` }), h("span", {}, x.category), h("small", {}, x.count.toLocaleString()))),
-        L.other && h("li", {}, h("i", { style: `background:${t.other}` }), h("span", {}, `Other (${L.other.categories})`), h("small", {}, L.other.count.toLocaleString()))));
+    const members = new Map();
+    s.graph.forEachNode((node) => {
+      const category = String(s.groupValues?.[node] ?? "∅");
+      if (!members.has(category)) members.set(category, []);
+      members.get(category).push(node);
+    });
+    const groupRow = (x, color) => {
+      const nodes = members.get(x.category).sort((a, b) => s.graph.degree(b) - s.graph.degree(a));
+      return h("li", {}, h("button", { class: "graph-legend-group", "aria-pressed": String(s.groupFocus === x.category), onclick: () => {
+        s.groupFocus = s.groupFocus === x.category ? null : x.category;
+        s.selected = null;
+        s.selectedEdge = null;
+        refresh(); renderLegend(); renderStatus();
+      } }, h("i", { style: `background:${color}`, "aria-hidden": "true" }), h("span", {}, x.category), h("small", {}, `${x.count.toLocaleString()} ${x.count === 1 ? "node" : "nodes"}`)),
+        h("small", { class: "graph-group-examples" }, `Includes ${nodes.slice(0, 2).map(label).join("; ")}`));
+    };
+    const extra = L.other ? [...members].map(([category, nodes]) => ({ category, count: nodes.length }))
+      .sort((a, b) => b.count - a.count || a.category.localeCompare(b.category, undefined, { numeric: true })).slice(G.SLOTS, G.SLOTS + 50) : [];
+    put(legend, h("summary", {}, `Node colour: ${L.title}`),
+      s.color === "community" && h("p", { class: "help" }, "Computed from connections. Names are group IDs; examples are the most connected nodes."),
+      s.color === "component" && h("p", { class: "help" }, "Each group is connected. No connection joins separate groups."),
+      h("ul", {}, L.legend.map((x) => groupRow(x, t.series[x.slot]))),
+      L.other && h("details", { class: "graph-legend-more", open: s.legendMoreOpen, ontoggle: (event) => { if (event.currentTarget.isConnected) s.legendMoreOpen = event.currentTarget.open; } }, h("summary", {}, `${L.other.categories} more groups · ${L.other.count.toLocaleString()} nodes`), h("ul", {}, extra.map((x) => groupRow(x, t.other))),
+        L.other.categories > 50 && h("p", { class: "help" }, "Showing the 50 largest remaining groups. Export the Nodes table for all group values.")));
   }
 
   const fmt = (v) => (typeof v !== "number" ? String(v) : Number.isInteger(v) ? v.toLocaleString() : v.toPrecision(3));
 
   function renderPanelTabs() {
-    syncTabs(panelTabs, [["node", "Node"], ["path", "Path"], ["stats", "Stats"]], s.panel, (key) => {
+    syncTabs(panelTabs, [["node", "Node"], ["relationship", "Relationship"], ["path", "Path"], ["stats", "Stats"]], s.panel, (key) => {
       s.panel = key;
       renderPanel();
     }, `graph-panel-${uid}`);
@@ -658,6 +848,7 @@ export function createGraphView(ui) {
     renderPanelTabs();
     if (!s.graph) return put(panelBody, empty("Open a graph to inspect it."));
     if (s.panel === "node") return renderNodePanel();
+    if (s.panel === "relationship") return renderRelationshipPanel();
     if (s.panel === "path") return renderPathPanel();
     put(panelBody, loading());
     const graph = s.graph;
@@ -696,7 +887,7 @@ export function createGraphView(ui) {
 
   function renderNodePanel() {
     const key = s.selected;
-    if (!key) return put(panelBody, empty("Enter a node ID or name in Find node and press Enter, or select a node on the graph. Use Show table for node metrics."));
+    if (!key) return put(panelBody, empty("Select a node or use Find."));
     const g = s.graph;
     const a = g.getNodeAttributes(key);
     const metricRows = Object.entries(s.metrics).filter(([m]) => m !== "degree").map(([m, vals]) => [METRICS[m]?.label ?? m, vals[key]]);
@@ -710,16 +901,46 @@ export function createGraphView(ui) {
       h("dl", { class: "kv graph-kv" },
         h("dt", {}, "Id"), h("dd", {}, key),
         h("dt", {}, "Degree"), h("dd", {}, fmt(g.degree(key))),
-        Object.entries(a.attributes ?? {}).map(([k, v]) => [h("dt", {}, k), h("dd", {}, v == null ? "null" : String(v))]),
+        Object.entries(a.attributes ?? {}).map(([k, v]) => [h("dt", {}, k), h("dd", {}, propertyValue(v))]),
         [...metricRows, ...groupRows].map(([k, v]) => [h("dt", {}, k), h("dd", {}, v == null ? "—" : fmt(v))])),
       h("div", { class: "graph-actions" },
         s.mode === "overview" && h("button", { class: "btn", onclick: () => expand(key).then((n) => toast(n ? `Added ${n} nodes` : "No new neighbours")) }, "Expand"),
         h("button", { class: "btn", onclick: () => (Object.assign(pathForm, { from: a.label, fromKey: key }), (s.panel = "path"), renderPanel()) }, "Path from here"),
         h("button", { class: "btn", onclick: () => (Object.assign(pathForm, { to: a.label, toKey: key }), (s.panel = "path"), renderPanel()) }, "Path to here"),
-        h("button", { class: "btn ghost", onclick: () => ui.views.query.open(G.neighborsSql(s.def, s.columns, a.raw, 1000)) }, "Edges in SQL")),
+        h("button", { class: "btn", onclick: () => showRelationships({ node: a.raw }) }, "Relationships"),
+        h("button", { class: "btn ghost", onclick: () => ui.views.query.open(G.neighborsSql(s.def, s.columns, a.raw, 1000)) }, "Relationships in SQL")),
       g.type === "directed"
         ? [nbrList("Outgoing", g.outNeighbors(key)), nbrList("Incoming", g.inNeighbors(key))]
         : nbrList("Neighbours", g.neighbors(key)));
+  }
+
+  const propertyValue = (value) => typeof value === "object" && value !== null ? h("pre", { class: "graph-property", tabindex: "0" }, propertyText(value)) : propertyText(value);
+
+  function endpoint(raw) {
+    const key = G.keyOf(raw);
+    return s.graph.hasNode(key) ? h("button", { class: "linkish", onclick: () => select(key, { center: true }) }, label(key)) : h("span", { title: "This node is not in the loaded graph." }, key);
+  }
+
+  function renderRelationshipPanel() {
+    if (s.relationship) {
+      const { columns, row } = s.relationship;
+      return put(panelBody,
+        h("h2", { class: "graph-node-title" }, relationshipLabel(columns, row)),
+        h("p", { class: "graph-link-ends" }, endpoint(row[0]), s.def.directed ? " → " : " — ", endpoint(row[1])),
+        h("dl", { class: "kv graph-kv" }, columns.map((c, i) => [h("dt", {}, c.name), h("dd", {}, propertyValue(row[i]))])),
+        s.selectedEdge && s.graph.getEdgeAttribute(s.selectedEdge, "count") > 1 && h("p", { class: "help" }, "This drawn connection contains several relationship rows."),
+        h("button", { class: "btn ghost", onclick: () => showRelationships({ pair: row.slice(0, 2) }) }, "All rows between these nodes"));
+    }
+    if (!s.selectedEdge) return put(panelBody, empty("Select a connection or a row in the Relationships table."));
+    const ends = s.graph.extremities(s.selectedEdge);
+    const data = s.relationshipData;
+    put(panelBody, h("h2", { class: "graph-node-title" }, "Connection"), h("p", {}, `${label(ends[0])}${s.def.directed ? " → " : " — "}${label(ends[1])}`),
+      h("p", { class: "help" }, "One drawn line can contain several relationship rows. Select a row to inspect its properties."),
+      s.relationshipLoading ? loading() : s.relationshipError ? errorBox(s.relationshipError) : data && [
+        h("ul", { class: "graph-relationship-list" }, data.rows.slice(0, 50).map((row, i) => h("li", {}, h("button", { class: "linkish", onclick: () => inspectRelationship(data.columns, row) }, `${relationshipLabel(data.columns, row)} · row ${i + 1}`)))),
+        data.rows.length > 50 && h("p", { class: "help" }, "Showing the first 50 rows. Use the relationship table to search all properties."),
+        !data.rows.length && empty("No relationship rows found."),
+        h("button", { class: "btn", onclick: () => showRelationships({ pair: ends.map(rawId) }) }, "Open relationship table")]);
   }
 
   // fromKey/toKey remember the node picked with "Path from/to here", since labels can repeat.
@@ -774,7 +995,7 @@ export function createGraphView(ui) {
     const columns = [{ name: "id", type: "" }, { name: "label", type: "" }, { name: "degree", type: "BIGINT" },
       ...attrNames.map((n) => ({ name: n, type: "" })), ...metricNames.map((n) => ({ name: n, type: "DOUBLE" })), ...groupNames.map((n) => ({ name: n, type: "" }))];
     const sortBy = s.metrics[s.size] ?? null;
-    const nodes = g.nodes().sort((a, b) => (sortBy ? sortBy[b] - sortBy[a] : g.degree(b) - g.degree(a)));
+    const nodes = g.nodes().filter((n) => s.groupFocus == null || String(s.groupValues?.[n] ?? "∅") === s.groupFocus).sort((a, b) => (sortBy ? sortBy[b] - sortBy[a] : g.degree(b) - g.degree(a)));
     const num = (v) => (display && typeof v === "number" && !Number.isInteger(v) ? v.toPrecision(4) : v);
     const rows = nodes.map((n) => {
       const a = g.getNodeAttributes(n);
@@ -785,8 +1006,13 @@ export function createGraphView(ui) {
   }
 
   function renderTable() {
+    if (s.tableKind === "relationships") {
+      if (!s.relationshipData && !s.relationshipLoading && !s.relationshipError) loadRelationships();
+      return renderRelationshipTable();
+    }
     const data = tableData({ display: true });
     put(tableWrap,
+      tableControls(),
       h("div", { class: "results-bar" },
         h("b", {}, `${data.rows.length.toLocaleString()} nodes`),
         data.rows.length > TABLE_ROWS && h("span", { class: "muted" }, `showing the top ${TABLE_ROWS.toLocaleString()}`),
@@ -794,7 +1020,27 @@ export function createGraphView(ui) {
         h("span", { class: "spacer" }),
         h("button", { class: "btn ghost", onclick: () => download(`${s.def.name ?? "graph"}-nodes.csv`, toCsv(tableData()), "text/csv") }, "Export CSV"),
         h("button", { class: "btn", onclick: guard(() => saveMetricsDialog()) }, "Save as table…")),
-      grid(data, { max: TABLE_ROWS }));
+      table(data.rows.slice(0, TABLE_ROWS), data.columns.map((c, i) => [c.name, (row) => propertyText(row[i])]), { onRow: (row) => { select(row[0], { center: true }); panelBody.tabIndex = -1; panelBody.focus({ preventScroll: true }); } }));
+  }
+
+  function tableControls() {
+    return h("div", { class: "graph-table-controls" }, select_("Table", s.tableKind, [["nodes", "Nodes"], ["relationships", "Relationships"]], (kind) => { s.tableKind = kind; renderTable(); }),
+      s.tableKind === "relationships" && h("span", { class: "help" }, s.relationshipScope.pair ? "Between selected nodes" : s.relationshipScope.node != null ? `Connected to ${label(G.keyOf(s.relationshipScope.node))}` : "Original rows in lake"),
+      s.tableKind === "relationships" && (s.relationshipScope.pair || s.relationshipScope.node != null) && h("button", { class: "btn ghost small", onclick: () => showRelationships() }, "All relationships"));
+  }
+
+  function renderRelationshipTable() {
+    const search = h("input", { class: "input", type: "search", value: s.relationshipSearch, placeholder: "Type, endpoint or property", "aria-label": "Search relationships", oninput: () => { s.relationshipSearch = search.value; } });
+    const searchForm = h("form", { class: "graph-relationship-search", onsubmit: (e) => { e.preventDefault(); s.relationshipSearch = search.value; loadRelationships(); } }, search, h("button", { class: "btn", type: "submit" }, "Search"),
+      h("button", { class: "btn ghost", type: "button", onclick: () => ui.views.query.open(relationshipsSql(s.def, s.edgeColumns, { ...s.relationshipScope, search: s.relationshipSearch }, null)) }, "Open in SQL"));
+    const data = s.relationshipData;
+    const exportData = data && { columns: data.columns, rows: data.rows.slice(0, TABLE_ROWS).map((row) => row.map(propertyText)) };
+    put(tableWrap, tableControls(), searchForm,
+      s.relationshipLoading ? loading("Loading relationships…") : s.relationshipError ? errorBox(s.relationshipError) : data && [
+        h("div", { class: "results-bar" }, h("b", {}, `${Math.min(data.rows.length, TABLE_ROWS).toLocaleString()} relationship ${data.rows.length === 1 ? "row" : "rows"}`),
+          data.rows.length > TABLE_ROWS && h("span", { class: "muted" }, "First 1,000 matches. Narrow the search or open SQL for all rows."),
+          h("button", { class: "btn ghost", onclick: () => download(`${s.def.name ?? "graph"}-relationships.csv`, toCsv(exportData), "text/csv") }, "Export shown rows")),
+        table(data.rows.slice(0, TABLE_ROWS), data.columns.map((c, i) => [c.name, (row) => propertyText(row[i])]), { onRow: (row) => inspectRelationship(data.columns, row), empty: "No matching relationship rows." })]);
   }
 
   function renderView() {
@@ -803,6 +1049,10 @@ export function createGraphView(ui) {
     if (s.showTable) renderTable();
     renderLegend();
     renderToolbar();
+    if (!s.showTable) requestAnimationFrame(() => {
+      s.sigma?.resize(); s.sigma?.refresh();
+      if (s.selectedEdge && s.graph?.hasEdge(s.selectedEdge)) fitNodes(s.graph.extremities(s.selectedEdge));
+    });
   }
 
   function render() {
@@ -872,6 +1122,7 @@ export function createGraphView(ui) {
         { name: "source", label: "Source column", type: "select", options: edgeCols, value: guess(edgeCols, "source", "src", "from") ?? edgeCols[0] },
         { name: "target", label: "Target column", type: "select", options: edgeCols, value: guess(edgeCols, "target", "dst", "to") ?? edgeCols[1] },
         { name: "weight", label: "Weight column (optional)", type: "select", options: [none, ...edgeCols], value: guess(edgeCols, "weight", "amount", "count") ?? "", hint: "A distance for paths and a strength for PageRank and communities." },
+        { name: "relationship", label: "Relationship type column (optional)", type: "select", options: [none, ...edgeCols], value: guess(edgeCols, "relationship", "type", "kind") ?? "", hint: "For example ACTED_IN or DIRECTED. Other columns are kept as properties." },
         ...(first.nodeTable ? [
           { name: "nodeId", label: "Node id column", type: "select", options: nodeCols, value: guess(nodeCols, "id") ?? nodeCols[0] },
           { name: "label", label: "Label column (optional)", type: "select", options: [none, ...nodeCols], value: guess(nodeCols, "name", "label", "title") ?? "" },
@@ -987,6 +1238,7 @@ export function createGraphView(ui) {
     if (!s.graph) return;
     restyle();
     s.sigma?.setSetting("labelColor", { color: s.theme.ink });
+    s.sigma?.setSetting("edgeLabelColor", { color: s.theme.ink });
   };
   const onMotion = () => { if (motion.matches) stopLayout(); };
   motion.addEventListener("change", onMotion);
@@ -1017,6 +1269,7 @@ export function createGraphView(ui) {
     dispose() {
       motion.removeEventListener("change", onMotion);
       ++loadSeq;
+      ++relationshipSeq;
       teardown();
       media.removeEventListener("change", onTheme);
       document.removeEventListener("pond:theme", onTheme);
@@ -1043,7 +1296,7 @@ export function createGraphView(ui) {
         throw new Error(`Unknown colour “${color}”. Use none, ${Object.keys(GROUPINGS).join(", ")}, or attr:<node column>.`);
       }
       if (size) s.size = size;
-      if (color) s.color = color;
+      if (color) { if (color !== s.color) s.groupFocus = null; s.color = color; }
       await restyle();
       renderToolbar();
     },

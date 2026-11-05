@@ -26,9 +26,10 @@ test("definitionFromTables quotes names and maps columns", () => {
     name: "follows", edgeTable: "social.core.follows", source: "src", target: "dst", weight: "w",
     nodeTable: "social.core.people", nodeId: "id", label: "name",
   });
-  assert.equal(def.edges_sql, 'SELECT "src" AS source, "dst" AS target, "w" AS weight\nFROM "social"."core"."follows"');
+  assert.equal(def.edges_sql, 'SELECT "src" AS source, "dst" AS target, "w" AS weight, * EXCLUDE ("src", "dst", "w")\nFROM "social"."core"."follows"');
   assert.equal(def.nodes_sql, 'SELECT "id" AS id, "name" AS label, * EXCLUDE ("id", "name")\nFROM "social"."core"."people"');
   assert.equal(g.definitionFromTables({ edgeTable: "a.b.c", source: "s", target: "t" }).nodes_sql, undefined);
+  assert.match(g.definitionFromTables({ edgeTable: "a.b.c", source: "s", target: "t", relationship: "kind" }).edges_sql, /"kind" AS relationship, \* EXCLUDE \("s", "t", "kind"\)/);
 });
 
 test("literals keep numbers numeric and escape strings", () => {

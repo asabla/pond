@@ -245,22 +245,28 @@ These come from MiniLake 1.9.1:
 
 ## Graphs
 
-Query history excludes tagged background previews and graph queries by default; **Include background queries** shows them. Overview counts rows only when requested. CSV export contains fetched rows; truncated results are labelled **Export fetched rows**. Drafts and layout are stored for this browser address, while saved objects and query/run history live in the lake.
+Query history excludes tagged background previews and graph queries by default; **Include background queries** shows them. Overview loads row counts in the background. CSV export contains fetched rows; truncated results are labelled **Export fetched rows**. Drafts and layout are stored for this browser address, while saved objects and query/run history live in the lake.
 
 The **Graph** tab draws a network from your tables and analyses it. A graph is defined by SQL:
 
 - **Edges:** a query whose first two columns are the source and target node ids. A column named `weight` weights edges. Other columns become edge attributes.
 - **Nodes (optional):** a query whose first column is the node id. A column named `label` names nodes. Other columns become attributes you can colour by.
 
-Create one with **New graph** (pick an edge table and map its columns), with **Open as graph** on a table page, or with **Show as graph** on any Query result whose first two columns are source and target. Save a graph to reopen it later. Saved graphs are stored in the lake under `/pond/graphs/`.
+Create one with **Graph → New graph** (pick an edge table and map its columns), with **Open as graph** on a table page, or with **Show as graph** on any Query result whose first two columns are source and target. The table mapping offers a relationship type column and retains other columns as properties. Save a graph to reopen it later. Saved graphs are stored in the lake under `/pond/graphs/`.
 
 What you can do with a graph:
 
 - **Size nodes** by degree, in-degree, out-degree, PageRank, betweenness, closeness, eigenvector centrality, HITS hub and authority scores, or clustering coefficient.
-- **Colour nodes** by Louvain community, connected component, strongly connected component, or any node column. The eight largest groups get their own colour, and the rest share "Other".
+- **Colour nodes** by Louvain community, connected component, strongly connected component, or any node column. The six largest groups get their own colour; expand the legend for the remaining groups. Community names are computed IDs. The legend shows representative nodes and lets you highlight a group.
 - **Find shortest paths** between two nodes. Weights count as distances when the graph has a weight column.
-- **Inspect** a node's attributes, metrics and neighbours, and see graph statistics: density, average degree, components, communities with modularity, average clustering and diameter.
-- **Switch to the table view** to see every node with its metrics, export them as CSV, or save them as a lake table to join in SQL.
+- **Inspect** a node's properties, metrics and neighbours, or select a connection and inspect its original relationship rows. **Details** opens or closes the inspector. Duplicate node names produce a choice with distinct IDs. The inspector also contains Path and Stats tabs.
+- **Switch to the table view** and choose **Nodes** or **Relationships**. Node rows open their details; their metrics can be exported or saved as a lake table. Relationship rows retain type, ID and all properties supplied by the edge query. Search matches endpoints and properties in SQL before applying the 1,000-row preview limit. Export shown rows or open the query in SQL for further work.
+
+**Find** stays beside the graph. **Display** contains node size, node colour, labels and layout controls. **Graph** contains definition actions. The legend is collapsible. On narrow screens Details opens as a bottom panel.
+
+Give each node a stable ID, label and properties, and each relationship a stable ID, source, target, type and properties. For example, one person can have separate `ACTED_IN` and `DIRECTED` rows for the same film, with different roles, dates and evidence sources. These rows remain separate in the Relationships table and inspector. A connection can show the selected relationship's label without labelling every line.
+
+The drawing and analytics combine rows with the same endpoints into one connection (unordered endpoints for undirected graphs). With a weight column, their weights are summed. Node degree and path calculations use those combined connections. Relationship inspection queries the original rows, including parallel relationships; it does not infer missing properties. Include the required columns in the edge and node SQL of existing saved definitions.
 
 Graphs with up to 30,000 edges load in full, and every metric is exact. Bigger graphs open on their 20 best-connected nodes and those nodes' neighbours. Double-click a node to load its neighbours. Metrics then describe the loaded nodes, while shortest paths search the whole graph in SQL, up to 20 hops and ignoring weights.
 

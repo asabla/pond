@@ -45,9 +45,12 @@ const normalize = (def) => ({
 const stripSemicolons = (sql) => sql.trim().replace(/;+\s*$/, "");
 
 // SQL for a graph over an existing table.
-function definitionFromTables({ name, edgeTable, source, target, weight, directed = true, nodeTable, nodeId, label }) {
+function definitionFromTables({ name, edgeTable, source, target, weight, relationship, directed = true, nodeTable, nodeId, label }) {
   const cols = [`${quoteIdent(source)} AS source`, `${quoteIdent(target)} AS target`];
   if (weight) cols.push(`${quoteIdent(weight)} AS weight`);
+  if (relationship) cols.push(`${quoteIdent(relationship)} AS relationship`);
+  const edgeUsed = [...new Set([source, target, weight, relationship].filter(Boolean))].map(quoteIdent);
+  cols.push(`* EXCLUDE (${edgeUsed.join(", ")})`);
   const def = { name, directed, edges_sql: `SELECT ${cols.join(", ")}\nFROM ${quoteTable(edgeTable)}` };
   if (nodeTable && nodeId) {
     const used = [...new Set([nodeId, label].filter(Boolean))].map(quoteIdent);
