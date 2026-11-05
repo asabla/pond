@@ -47,7 +47,7 @@ func New(o Options) http.Handler {
 	transport.ResponseHeaderTimeout = 300 * time.Second
 	h := &handler{
 		Options: o,
-		allowed: map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true, o.Host: true},
+		allowed: map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true, strings.ToLower(o.Host): true},
 		proxy: &httputil.ReverseProxy{
 			Rewrite: func(r *httputil.ProxyRequest) {
 				r.SetURL(target)
@@ -105,7 +105,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/pond/config" && r.Method == http.MethodGet:
 		h.config(w, r)
-	case r.Method == http.MethodGet:
+	case r.Method == http.MethodGet || r.Method == http.MethodHead:
 		h.static(w, p)
 	default:
 		sendJSON(w, http.StatusMethodNotAllowed, map[string]string{"error_code": "METHOD_NOT_ALLOWED", "message": r.Method})

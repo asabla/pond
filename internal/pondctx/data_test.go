@@ -107,3 +107,27 @@ func TestImportRefusesUnsafeSnapshotsAndKeepsData(t *testing.T) {
 		t.Errorf("garbage: %v", err)
 	}
 }
+
+func TestRecoverImportRestoresTheOnlyCopy(t *testing.T) {
+	c := ForDir(t.TempDir())
+	// Killed between the two renames: data is gone and data.old holds the lake.
+	write(t, filepath.Join(c.oldDataPath(), "snapshot.json"), "old")
+	if err := RecoverImport(c); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(c.DataPath(), "snapshot.json")); err != nil || string(b) != "old" {
+		t.Errorf("data not restored: %q, %v", b, err)
+	}
+
+	// Killed after the swap: the new data stays, the old copy goes, caches move over.
+	write(t, filepath.Join(c.oldDataPath(), ".ivy2-cache", "jar"), "cache")
+	if err := RecoverImport(c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.oldDataPath()); !os.IsNotExist(err) {
+		t.Errorf("data.old left behind: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(c.DataPath(), ".ivy2-cache", "jar")); err != nil {
+		t.Errorf("cache not kept: %v", err)
+	}
+}

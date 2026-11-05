@@ -209,6 +209,20 @@ func TestAcceptsAllowedHostsWhenShared(t *testing.T) {
 	}
 }
 
+func TestHostFlagMatchesAnyCase(t *testing.T) {
+	e := setup(t, nil, "")
+	e.pond.Config.Handler = New(Options{Host: "MyBox", Lake: e.client(), Static: e.static()})
+	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "MyBox:8700"}); resp.StatusCode != 200 {
+		t.Errorf("status %d", resp.StatusCode)
+	}
+}
+
+func TestServesStaticFilesToHead(t *testing.T) {
+	if resp, body := setup(t, nil, "").request("HEAD", "/app.js", nil, nil); resp.StatusCode != 200 || len(body) != 0 {
+		t.Errorf("HEAD: status %d, %d body bytes", resp.StatusCode, len(body))
+	}
+}
+
 func TestRejectsForeignHostHeader(t *testing.T) {
 	e := setup(t, nil, "")
 	if resp, _ := e.request("GET", "/", nil, map[string]string{"Host": "attacker.example"}); resp.StatusCode != 403 {

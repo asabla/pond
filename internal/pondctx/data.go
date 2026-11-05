@@ -131,8 +131,10 @@ func Import(c Context, r io.Reader) error {
 	if err := unpack(r, staging); err != nil {
 		return err
 	}
-	old := filepath.Join(c.StateDir(), "data.old")
-	os.RemoveAll(old)
+	old := c.oldDataPath()
+	if err := os.RemoveAll(old); err != nil {
+		return err
+	}
 	if err := os.Rename(c.DataPath(), old); err != nil {
 		return err
 	}
@@ -141,6 +143,25 @@ func Import(c Context, r io.Reader) error {
 		return err
 	}
 	for _, dir := range cacheDirs { // snapshots leave caches out; keep the ones already here
+		os.Rename(filepath.Join(old, dir), filepath.Join(c.DataPath(), dir))
+	}
+	os.RemoveAll(old) // the import is done; RecoverImport cleans up whatever is left
+	return nil
+}
+
+func (c Context) oldDataPath() string { return filepath.Join(c.StateDir(), "data.old") }
+
+// RecoverImport finishes or undoes an import that was interrupted while swapping the
+// data folder: if data is missing, data.old holds the only copy and is put back.
+func RecoverImport(c Context) error {
+	old := c.oldDataPath()
+	if _, err := os.Stat(old); err != nil {
+		return nil
+	}
+	if _, err := os.Stat(c.DataPath()); os.IsNotExist(err) {
+		return os.Rename(old, c.DataPath())
+	}
+	for _, dir := range cacheDirs {
 		os.Rename(filepath.Join(old, dir), filepath.Join(c.DataPath(), dir))
 	}
 	return os.RemoveAll(old)

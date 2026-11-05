@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -165,6 +166,27 @@ var ErrRunning = errors.New("context is already running")
 // Acquire takes the context's lock, or returns ErrRunning when another pond holds it.
 // Holding it also covers startup, before any containers or URLs exist.
 func Acquire(c Context) (*Lock, error) {
+	// Another pond probing the lock (Serving) holds it for an instant; retry briefly so a
+	// `pond ls` in another terminal can't make this look like a running context.
+	for i := 0; ; i++ {
+		l, err := tryLock(c)
+		if !errors.Is(err, ErrRunning) || i == 4 {
+			if err == nil {
+				// Holding the lock means no pond is running here, so a run file is
+				// left over from one that was killed. Its PID may be reused by now.
+				os.Remove(c.RunFile())
+				if err = RecoverImport(c); err != nil {
+					l.Release()
+					return nil, fmt.Errorf("recovering an interrupted import: %w", err)
+				}
+			}
+			return l, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func tryLock(c Context) (*Lock, error) {
 	if err := os.MkdirAll(c.StateDir(), 0o755); err != nil {
 		return nil, err
 	}
@@ -183,7 +205,6 @@ func Acquire(c Context) (*Lock, error) {
 	return &Lock{f}, nil
 }
 
-// Release drops the lock. Exiting drops it too.
 func (l *Lock) Release() {
 	if l != nil {
 		l.f.Close()
@@ -198,7 +219,7 @@ func Serving(c Context) *RunInfo {
 	if _, err := os.Stat(c.lockPath()); err != nil {
 		return nil
 	}
-	l, err := Acquire(c)
+	l, err := tryLock(c)
 	if err == nil {
 		l.Release()
 		return nil
@@ -219,7 +240,22 @@ func WriteRunFile(c Context, info RunInfo) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.RunFile(), b, 0o644)
+	// Write and rename, so a reader never sees half a file.
+	tmp := c.RunFile() + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, c.RunFile())
+}
+
+// bindMount builds a --mount value. Its fields are CSV, so quoting keeps commas and
+// colons in the path intact (-v would split on the colon).
+func bindMount(src, dst string) string {
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	w.Write([]string{"type=bind", "source=" + src, "target=" + dst})
+	w.Flush()
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func PrepareStateDir(c Context) error {
@@ -261,7 +297,7 @@ func Start(ctx context.Context, c Context, image string, onStatus func(string)) 
 	run = append(run, labels...)
 	run = append(run,
 		"-p", fmt.Sprintf("127.0.0.1::%d", minilakePort),
-		"-v", filepath.Join(c.StateDir(), "data")+":"+DataDir,
+		"--mount", bindMount(c.DataPath(), DataDir),
 		// MiniLake starts Spark job containers as siblings through the host's Docker.
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
 		"-e", "MINILAKE_MCP=1",
@@ -377,7 +413,10 @@ type Running struct {
 
 // List returns running MiniLake containers started by Pond, across all directories.
 func List() ([]Running, error) {
-	out, err := docker(context.Background(), false, "ps", "--filter", "label="+Label, "--format", "{{json .}}")
+	// Ask for the label by name: the Labels column joins them with commas, which a
+	// directory name can contain too.
+	format := fmt.Sprintf(`{"Dir":{{json (.Label %q)}},"Status":{{json .Status}}}`, LabelDir)
+	out, err := docker(context.Background(), false, "ps", "--filter", "label="+Label, "--format", format)
 	if err != nil {
 		return nil, err
 	}
@@ -386,17 +425,11 @@ func List() ([]Running, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var row struct{ Labels, Status string }
+		var row struct{ Dir, Status string }
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			return nil, err
 		}
-		labels := map[string]string{}
-		for _, kv := range strings.Split(row.Labels, ",") {
-			if k, v, ok := strings.Cut(kv, "="); ok {
-				labels[k] = v
-			}
-		}
-		dir := labels[LabelDir]
+		dir := row.Dir
 		if dir == "" {
 			dir = "."
 		}

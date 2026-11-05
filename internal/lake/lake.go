@@ -81,7 +81,8 @@ func (c *Client) requestJSONTimeout(ctx context.Context, timeout time.Duration, 
 		if json.Unmarshal(data, &e) == nil && e.Message != "" {
 			return nil, &Error{Status: resp.StatusCode, Message: e.Message}
 		}
-		return nil, fmt.Errorf("%s %s -> %d: %q", method, path, resp.StatusCode, truncate(data, 300))
+		// Keep the status, so callers can still tell a 404 from other failures.
+		return nil, &Error{Status: resp.StatusCode, Message: fmt.Sprintf("%s %s -> %d: %q", method, path, resp.StatusCode, truncate(data, 300))}
 	}
 	out := map[string]json.RawMessage{}
 	if len(bytes.TrimSpace(data)) > 0 {

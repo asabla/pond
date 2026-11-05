@@ -305,8 +305,8 @@ func up(a *args) error {
 		}
 	}
 
-	// SIGTERM (`pond down`, a closed terminal) cleans up the same way Ctrl-C does.
-	sig, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// SIGTERM (`pond down`) and SIGHUP (a closed terminal) clean up the same way Ctrl-C does.
+	sig, stopSignals := signal.NotifyContext(context.Background(), stopSignals...)
 	var srv *http.Server
 	defer func() {
 		stopSignals() // a second Ctrl-C during cleanup kills pond
@@ -536,7 +536,7 @@ func seedContext(a *args) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), stopSignals...)
 	defer stop()
 	return seed.Run(ctx, client, c.Dir, logf)
 }
@@ -558,13 +558,22 @@ func confirm(prompt, want string) error {
 
 func reset(a *args) error {
 	c := pondctx.ForDir(a.dir)
-	info := pondctx.Serving(c)
 	if !a.yes {
 		if err := confirm(fmt.Sprintf("This deletes every catalog, table, file, job, query and secret in %s.", c.Name()), c.Name()); err != nil {
 			return err
 		}
 	}
+	info := pondctx.Serving(c)
 	if info == nil {
+		// Hold the lock while deleting, so a `pond up` can't start on half-deleted data.
+		lock, err := pondctx.Acquire(c)
+		if errors.Is(err, pondctx.ErrRunning) {
+			return fmt.Errorf("%s just started; run `pond reset` again to reset it while it runs", c.Name())
+		}
+		if err != nil {
+			return err
+		}
+		defer lock.Release()
 		if err := pondctx.ClearData(c); err != nil {
 			return err
 		}
@@ -578,7 +587,7 @@ func reset(a *args) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), stopSignals...)
 	defer stop()
 	if err := client.Reset(ctx); err != nil {
 		return err
@@ -587,18 +596,26 @@ func reset(a *args) error {
 	return seed.Run(ctx, client, c.Dir, logf)
 }
 
-func stopped(c pondctx.Context, dir string) error {
-	if pondctx.Serving(c) != nil {
-		return fmt.Errorf("%s is running. Stop it first with `pond down%s`", c.Name(), strings.TrimPrefix(startCommand(dir), "pond"))
+// lockStopped takes the context's lock for an offline operation on its data, so a
+// `pond up` can't start in the middle of it. It fails when the context is running.
+func lockStopped(c pondctx.Context, dir string) (*pondctx.Lock, error) {
+	if st, err := os.Stat(c.Dir); err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", c.Dir)
 	}
-	return nil
+	lock, err := pondctx.Acquire(c)
+	if errors.Is(err, pondctx.ErrRunning) {
+		return nil, fmt.Errorf("%s is running. Stop it first with `pond down%s`", c.Name(), strings.TrimPrefix(startCommand(dir), "pond"))
+	}
+	return lock, err
 }
 
 func export(a *args) error {
 	c := pondctx.ForDir(a.dir)
-	if err := stopped(c, a.dir); err != nil {
+	lock, err := lockStopped(c, a.dir)
+	if err != nil {
 		return err
 	}
+	defer lock.Release()
 	out := a.output
 	if out == "" {
 		out = fmt.Sprintf("%s-%s.pond.tar.gz", c.Name(), time.Now().Format("20060102-150405"))
@@ -621,25 +638,33 @@ func export(a *args) error {
 
 func importSnapshot(a *args) error {
 	c := pondctx.ForDir(a.dir)
-	if err := stopped(c, a.dir); err != nil {
-		return err
-	}
 	f, err := os.Open(a.file)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	if !pondctx.Fresh(c) && !a.yes {
-		if err := confirm(fmt.Sprintf("%s already has lake data. Importing replaces all of it.", c.Name()), c.Name()); err != nil {
-			return err
+		if pondctx.Serving(c) == nil {
+			if err := confirm(fmt.Sprintf("%s already has lake data. Importing replaces all of it.", c.Name()), c.Name()); err != nil {
+				return err
+			}
 		}
 	}
+	lock, err := lockStopped(c, a.dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	if err := pondctx.Import(c, f); err != nil {
 		return err
 	}
 	logf("Imported %s into %s. Start it with `%s`.", a.file, c.Name(), startCommand(a.dir))
 	return nil
 }
+
+// stopSignals end a command the way Ctrl-C does: SIGTERM comes from `pond down`, and
+// SIGHUP from closing the terminal pond runs in.
+var stopSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
 
 // downTimeout bounds how long down waits for a running pond to stop.
 const downTimeout = time.Minute

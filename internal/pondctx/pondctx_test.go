@@ -188,7 +188,7 @@ func TestStartScopesContainerToContext(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		data + ":/data", "MINILAKE_DOCKER_NETWORK=" + f.ctx.Network(),
+		"type=bind,source=" + data + ",target=/data", "MINILAKE_DOCKER_NETWORK=" + f.ctx.Network(),
 		"pond.context=" + f.ctx.ID(), "127.0.0.1::8000", "pond.dir=" + f.ctx.Dir,
 	} {
 		if !slices.Contains(run, want) {
@@ -264,6 +264,32 @@ func TestServingTrustsTheLockNotThePID(t *testing.T) {
 	again.Release()
 }
 
+func TestAcquireDropsAStaleRunFile(t *testing.T) {
+	c := ForDir(t.TempDir())
+	if err := os.MkdirAll(c.StateDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Left by a pond that was killed; the PID may belong to something else now.
+	write(t, c.RunFile(), `{"pid":1}`)
+	lock, err := Acquire(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	if _, err := os.Stat(c.RunFile()); !os.IsNotExist(err) {
+		t.Errorf("stale run file kept: %v", err)
+	}
+}
+
+func TestBindMountQuotesCommasAndColons(t *testing.T) {
+	if got, want := bindMount("/a,b:c", "/data"), `type=bind,"source=/a,b:c",target=/data`; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+	if got, want := bindMount("/plain", "/data"), "type=bind,source=/plain,target=/data"; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
 func TestListReadsLabelsAndRunFile(t *testing.T) {
 	f := setup(t)
 	if got, err := List(); err != nil || len(got) != 0 {
@@ -275,9 +301,7 @@ func TestListReadsLabelsAndRunFile(t *testing.T) {
 	}
 	defer lock.Release()
 	WriteRunFile(f.ctx, RunInfo{PID: os.Getpid(), UI: "http://localhost:8700"})
-	row, _ := json.Marshal(map[string]string{
-		"Labels": "pond.context=" + f.ctx.ID() + ",pond.dir=" + f.ctx.Dir, "Status": "Up 1 minute",
-	})
+	row, _ := json.Marshal(map[string]string{"Dir": f.ctx.Dir, "Status": "Up 1 minute"})
 	t.Setenv("FAKE_PS", string(row))
 	got, err := List()
 	want := []Running{{Name: "my-project", Dir: f.ctx.Dir, UI: "http://localhost:8700", Status: "Up 1 minute"}}
