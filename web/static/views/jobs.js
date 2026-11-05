@@ -57,13 +57,33 @@ export function createJobsView(ui) {
   }
 
   async function listPage(live) {
-    const [jobs, runs] = await Promise.all([lake.listJobs(), lake.listRuns({ limit: 50 })]);
+    let [jobs, runs] = await Promise.all([lake.listJobs(), lake.listRuns({ limit: 50 })]);
     if (!live()) return;
-    const lastRun = {};
-    for (const r of runs) if (r.job_id && !lastRun[r.job_id]) lastRun[r.job_id] = r;
+    const body = h("div", {}, listSections(jobs, runs));
     page(
       titleRow("Jobs", null, [button("Run a script", () => scriptDialog("run")), button("New job", () => scriptDialog("job"), "primary")]),
       h("p", { class: "lede" }, "Python and PySpark scripts run in Spark containers on this context's network, so they can read its tables and volumes. The first run downloads the Spark image."),
+      body,
+    );
+    // While a run is going, redraw the tables only when a job or run changed, so focus and
+    // scroll survive the polling.
+    let shown = listKey(jobs, runs);
+    pollWhile(() => runs.some((r) => !lake.isRunDone(r)), live, async () => {
+      const [nextJobs, nextRuns] = await Promise.all([lake.listJobs(), lake.listRuns({ limit: 50 })]);
+      if (!live()) return;
+      runs = nextRuns;
+      const key = listKey(nextJobs, nextRuns);
+      if (key !== shown) body.replaceChildren(...listSections(nextJobs, nextRuns));
+      shown = key;
+    });
+  }
+
+  const listKey = (jobs, runs) => JSON.stringify([jobs.map((j) => [j.job_id, j.settings?.name]), runs.map((r) => [r.run_id, r.state])]);
+
+  function listSections(jobs, runs) {
+    const lastRun = {};
+    for (const r of runs) if (r.job_id && !lastRun[r.job_id]) lastRun[r.job_id] = r;
+    return [
       section("Jobs", jobs.length, table(jobs, [
         ["Name", (j) => h("a", { href: `#/jobs/job/${j.job_id}` }, j.settings?.name ?? `Job ${j.job_id}`)],
         ["Script", (j) => h("span", { class: "mono" }, lake.jobScript(j)?.python_file ?? "—")],
@@ -74,8 +94,19 @@ export function createJobsView(ui) {
         })],
       ], { onRow: (j) => ui.navigate("jobs", "job", j.job_id), empty: "No jobs yet. A job is a saved script you can run again." })),
       section("Recent runs", runs.length, runsTable(runs)),
-    );
-    if (runs.some((r) => !lake.isRunDone(r))) poll(live);
+    ];
+  }
+
+  // Calls step every POLL_MS while busy() holds and the page is current and visible. A
+  // failed step is retried on the next tick rather than replacing the page with an error.
+  function pollWhile(busy, live, step) {
+    clearTimeout(pollTimer);
+    if (!busy()) return;
+    pollTimer = setTimeout(async () => {
+      if (!live() || el.hidden) return;
+      await step().catch(() => {});
+      if (live()) pollWhile(busy, live, step);
+    }, POLL_MS);
   }
 
   function runsTable(runs) {
@@ -126,18 +157,15 @@ export function createJobsView(ui) {
       runsBox,
     );
     // Refresh only the runs while one is going, so edits to the script and parameters survive.
-    const refreshRuns = (list) => {
-      if (!list.some((r) => !lake.isRunDone(r))) return;
-      clearTimeout(pollTimer);
-      pollTimer = setTimeout(async () => {
-        if (!live() || el.hidden) return;
-        const next = await lake.listRuns({ jobId: id, limit: 25 }).catch(() => list);
-        if (!live()) return;
+    let list = runs;
+    pollWhile(() => list.some((r) => !lake.isRunDone(r)), live, async () => {
+      const next = await lake.listRuns({ jobId: id, limit: 25 });
+      if (!live()) return;
+      if (JSON.stringify(next.map((r) => [r.run_id, r.state])) !== JSON.stringify(list.map((r) => [r.run_id, r.state]))) {
         runsBox.replaceChildren(section("Runs", next.length, runsTable(next)));
-        refreshRuns(next);
-      }, POLL_MS);
-    };
-    refreshRuns(runs);
+      }
+      list = next;
+    });
   }
 
   async function runPage(id, live) {
@@ -179,14 +207,15 @@ export function createJobsView(ui) {
             output?.logs_truncated && h("p", { class: "help muted" }, "Output was truncated by MiniLake."),
           ]),
     );
-    if (!done) poll(live);
-  }
-
-  function poll(live) {
-    clearTimeout(pollTimer);
-    pollTimer = setTimeout(() => {
-      if (live() && !el.hidden) show(current.kind === "list" ? [] : [current.kind, current.id]);
-    }, POLL_MS);
+    // Redraw only when the run's state changes, so the Cancel button keeps focus.
+    let state = JSON.stringify(run.state);
+    pollWhile(() => !done, live, async () => {
+      const next = await lake.getRun(id);
+      if (live() && JSON.stringify(next.state) !== state) {
+        state = JSON.stringify(next.state);
+        show(["run", id]);
+      }
+    });
   }
 
   async function scriptDialog(mode) {
@@ -194,9 +223,9 @@ export function createJobsView(ui) {
       title: mode === "job" ? "New job" : "Run a script",
       intro: mode === "job"
         ? "The script is saved to the workspace under /Shared/pond and can be run again from here."
-        : "Runs once without creating a job. The script is still saved under /Shared/pond.",
+        : "Runs once without creating a job. The script is saved under /Shared/pond/runs.",
       fields: [
-        { name: "name", label: "Name", required: true, value: mode === "job" ? "" : "adhoc", pattern: "[\\w .-]+" },
+        { name: "name", label: "Name", required: true, value: mode === "job" ? "" : "adhoc", pattern: "[\\w .\\-]+" },
         { name: "source", label: "Python", type: "textarea", value: TEMPLATE, rows: 14, required: true },
         { name: "params", label: "Parameters", placeholder: "Optional arguments, space separated" },
       ],

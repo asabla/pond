@@ -147,9 +147,17 @@ export function createGraphView(ui) {
         live();
         addEdges(G.edgeRecords(edgeRows));
         if (norm.nodes_sql) {
-          const nodeRows = await lake.runSql(G.nodesSql(norm));
+          // Nodes without edges are part of the graph too, unless there are too many to draw.
+          const nodeCount = Number((await lake.runSql(G.countNodesSql(norm))).rows[0]?.[0] ?? 0);
           live();
-          addNodes(G.nodeRecords(nodeRows), { onlyExisting: false });
+          if (nodeCount <= G.FULL_LOAD_NODES) {
+            addNodes(G.nodeRecords(await lake.runSql(G.nodesSql(norm))), { onlyExisting: false });
+          } else {
+            const head = await lake.runSql(`${G.nodesSql(norm)} LIMIT 0`);
+            live();
+            addNodes(G.nodeRecords(await lake.runSql(G.nodesInEdgesSql(norm, s.columns, head.columns[0].name))));
+          }
+          live();
         }
       } else {
         s.mode = "overview";
@@ -1008,6 +1016,8 @@ export function createGraphView(ui) {
     });
     if (!v) return;
     const [catalog, schema, table] = v.table.split(".");
+    const exists = await lake.getTable(v.table).then(() => true, () => false);
+    if (exists && !(await confirmDialog({ title: `Replace ${v.table}?`, body: "The table already exists. Its rows are replaced by the node metrics.", confirm: "Replace" }))) return;
     const res = await lake.importFile({ data: new Blob([toCsv(tableData())], { type: "text/csv" }), fileName: `${table}.csv`, catalog, schema, table, mode: "replace" });
     toast(`Saved ${res.rows} rows to ${res.table}`);
     ui.refreshTree();
@@ -1083,7 +1093,10 @@ export function createGraphView(ui) {
       await refreshSaved();
       const name = parts[0];
       if (name && name !== s.def?.name) {
-        open(name).catch(() => {});
+        // A bookmark to a deleted or broken graph says so instead of showing nothing.
+        open(name).catch((err) => {
+          if (!/Another graph was opened/.test(err.message)) toast(err.message, "err");
+        });
         return;
       }
       render();

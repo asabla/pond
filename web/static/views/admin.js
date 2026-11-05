@@ -105,7 +105,7 @@ export function createAdminView(ui) {
   }
 
   async function newScope() {
-    const v = await formDialog({ title: "New secret scope", fields: [{ name: "scope", label: "Scope", required: true, pattern: "[\\w.-]+" }], submit: "Create" });
+    const v = await formDialog({ title: "New secret scope", fields: [{ name: "scope", label: "Scope", required: true, pattern: "[\\w.\\-]+" }], submit: "Create" });
     if (!v) return;
     await lake.createScope(v.scope).catch((err) => toast(err.message, "err"));
     show();
@@ -116,7 +116,7 @@ export function createAdminView(ui) {
       title: scope ? `Add secret to ${scope}` : "Add secret",
       fields: [
         !scope && { name: "scope", label: "Scope", required: true, hint: "Created if it does not exist." },
-        { name: "key", label: "Key", required: true, pattern: "[\\w.-]+" },
+        { name: "key", label: "Key", required: true, pattern: "[\\w.\\-]+" },
         { name: "value", label: "Value", type: "password", required: true },
       ].filter(Boolean),
       submit: "Save secret",

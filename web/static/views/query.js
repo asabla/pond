@@ -1,5 +1,6 @@
 // Query: SQL editor, results, saved queries and the lake's query history.
 import { h, grid, toCsv, download, store, toast, formDialog, confirmDialog, empty, errorBox, loading, fmtTime, fmtDuration, guard, syncTabs } from "../dom.js";
+import { changesCatalog } from "../sql.js";
 
 const GRID_MAX_ROWS = 1000;
 const DRAFT_KEY = "pond.draft";
@@ -57,7 +58,7 @@ export function createQueryView(ui) {
     results.replaceChildren(h("div", { class: "results-bar" }, h("span", { class: "loading" }), "Running…"));
     try {
       state.last = { sql, result: await lake.runSql(sql), byAgent };
-      if (/^\s*(create|drop|alter)\b/i.test(sql)) ui.refreshTree();
+      if (changesCatalog(sql)) ui.refreshTree();
     } catch (err) {
       state.last = { sql, error: err.message, byAgent };
     } finally {

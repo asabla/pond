@@ -162,6 +162,13 @@ export function createFilesView(ui) {
 
   async function upload(files) {
     try {
+      const taken = [];
+      for (const f of files) if (await lake.fileExists(joinPath(current.path, f.name))) taken.push(f.name);
+      if (taken.length && !(await confirmDialog({
+        title: `Replace ${taken.length === 1 ? taken[0] : `${taken.length} files`}?`,
+        body: `${taken.join(", ")} already ${taken.length === 1 ? "exists" : "exist"} in ${current.path}. Uploading replaces ${taken.length === 1 ? "it" : "them"}.`,
+        confirm: "Replace",
+      }))) return;
       for (const f of files) {
         toast(`Uploading ${f.name}…`);
         await lake.uploadFile(joinPath(current.path, f.name), f);
@@ -174,7 +181,7 @@ export function createFilesView(ui) {
   }
 
   async function newFolder() {
-    const v = await formDialog({ title: `New folder in ${current.path}`, fields: [{ name: "name", label: "Name", required: true, pattern: "[^/]+" }], submit: "Create" });
+    const v = await formDialog({ title: `New folder in ${current.path}`, fields: [{ name: "name", label: "Name", required: true, pattern: "[^\\/]+" }], submit: "Create" });
     if (!v) return;
     try {
       await lake.makeDir(joinPath(current.path, v.name));
@@ -194,6 +201,7 @@ export function createFilesView(ui) {
     if (entry.is_directory) await lake.deleteTree(entry.path);
     else await lake.deleteFile(entry.path);
     toast(`Deleted ${entry.path}`);
+    if (current.selected?.path === entry.path) current.selected = null;
     if (entry.path === current.path) go("dbfs", parentOf(entry.path));
     else if (!el.hidden) show([current.root, ...current.path.split("/").filter(Boolean)]);
     return true;
@@ -224,7 +232,12 @@ export function createFilesView(ui) {
         ["Type", (o) => (o.object_type === "DIRECTORY" ? "" : `${o.object_type.toLowerCase()}${o.language ? ` · ${o.language.toLowerCase()}` : ""}`)],
         ["Size", (o) => fmtBytes(o.size)],
         ["", (o) => action("Delete", async () => {
-          if (!(await confirmDialog({ title: `Delete ${baseName(o.path)}?`, body: `${o.path}${o.object_type === "DIRECTORY" ? " and everything in it" : ""} will be deleted from the workspace.` }))) return;
+          const folder = o.object_type === "DIRECTORY";
+          if (!(await confirmDialog({
+            title: `Delete ${baseName(o.path)}?`,
+            body: `${o.path}${folder ? " and everything in it" : ""} will be deleted from the workspace.`,
+            typeToConfirm: folder ? baseName(o.path) : undefined,
+          }))) return;
           await lake.deleteWorkspace(o.path, true);
           toast(`Deleted ${o.path}`);
           show(["workspace", ...current.path.split("/").filter(Boolean)]);
@@ -260,12 +273,13 @@ export function createFilesView(ui) {
   async function newScript() {
     const v = await formDialog({
       title: `New script in ${current.path}`,
-      fields: [{ name: "name", label: "File name", required: true, value: "script.py", pattern: "[^/]+" }],
+      fields: [{ name: "name", label: "File name", required: true, value: "script.py", pattern: "[^\\/]+" }],
       submit: "Create",
     });
     if (!v) return;
     const path = joinPath(current.path, v.name);
     try {
+      if (await lake.workspaceExists(path)) return toast(`${path} already exists. Pick another name.`, "err");
       await lake.importWorkspace(path, "# New script\n");
       go("workspace", path);
     } catch (err) {
