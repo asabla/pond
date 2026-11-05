@@ -12,9 +12,10 @@ Use it to try out Databricks-style catalogs, Delta tables, SQL and PySpark jobs 
 ## Requirements
 
 - Go 1.25 or later, if you build pond yourself.
-- Docker, through Docker Desktop, OrbStack or colima. Pond runs MiniLake in a container.
+- For a managed local lake: a running Docker-compatible engine and its CLI, or Podman with its API service. Docker Desktop, Colima in Docker mode, OrbStack, and Rancher Desktop in Moby mode use the Docker connection path.
+- For an existing service: `--minilake URL` connects through HTTP without requiring a local container CLI.
 
-Pond is a single binary with the UI embedded. It has no other dependencies.
+Pond is a single binary with the UI embedded. Managed mode also needs the selected runtime CLI. An external MiniLake owns its own execution dependencies.
 
 ## Install
 
@@ -70,6 +71,7 @@ pond seed [DIR]                  # run the seed scripts again (see Seed data)
 pond reset [DIR] [--yes]         # delete the lake's data, then seed it again
 pond export [DIR] [-o FILE]      # snapshot a stopped context's data to a .tar.gz
 pond import FILE [DIR] [--yes]   # replace a stopped context's data with a snapshot
+pond doctor [DIR]                # check the stored runtime connection without creating containers
 pond version                     # print the version
 ```
 
@@ -81,20 +83,58 @@ Flags for `up` (each flag can also be set with an environment variable):
 | `--host HOST` | `POND_HOST` | `127.0.0.1` | Address the UI binds to. See [Sharing a context](#sharing-a-context). |
 | `--image IMAGE` | `POND_MINILAKE_IMAGE` | `ghcr.io/dmux/minilake:1.9.1` | MiniLake container image. |
 | `--minilake URL` | `MINILAKE_URL` | none | Use a MiniLake you run yourself instead of starting a container. |
+| `--runtime NAME` | `POND_RUNTIME` | stored selection, else `docker` | `docker`, `colima`, `orbstack`, `rancher-desktop`, or `podman`. |
+| `--connection NAME` | `POND_CONNECTION` | stored connection, else the selected CLI default | Existing Docker context or Podman connection. |
+| `--runtime-socket PATH` | `POND_RUNTIME_SOCKET` | resolved for the selected runtime | Engine-side socket to mount into MiniLake. This can differ from the host-forwarded socket. |
+| `--migrate-runtime` | none | off | Back up stopped lake data before changing the stored runtime connection or MiniLake image. |
 | `--open` | none | off | Open the UI in a browser. |
 
 Set `POND_VERBOSE=1` to log every HTTP request pond serves.
 
 `reset` and `import` ask you to type the context's name before deleting data, unless you pass `--yes`.
 
-The directory has to be visible to Docker. colima and Docker Desktop share your home directory by default. If Docker can't see the path, pond refuses to start and explains why.
+The directory must be visible to the selected engine. Startup checks the shared data directory and MiniLake's access to the engine API. A failed check identifies the path or socket that needs repair.
+
+### Container runtimes and external services
+
+Choose a provider on first start:
+
+```sh
+pond --runtime colima
+pond --runtime orbstack
+pond --runtime rancher-desktop       # choose Moby/dockerd in Rancher Desktop
+pond --runtime podman               # configure a local Podman service or machine first
+pond --runtime docker --connection rootless
+```
+
+Provider names select existing CLI connections. Use `--connection NAME` for a different profile. Pond does not install a provider, start its VM, or change its default connection. On Linux, rootless Podman needs its user API service enabled; native Docker rootless mode uses its own Unix socket. `pond doctor --runtime podman` checks discovery and service access before a context starts. `pond doctor DIR` checks a context's stored selection. Diagnostics do not create containers or execute jobs.
+
+Pond stores the verified connection, engine-side socket, and image in `.pond/runtime.json`. Subsequent commands use that connection even if the CLI's default changes. To change the engine connection or image for existing data, stop the context and opt into migration:
+
+```sh
+pond down ./project
+pond ./project --runtime podman --migrate-runtime
+```
+
+Migration creates a private `before-runtime-change-*.pond.tar.gz` backup in `.pond/` before changing the selection. It does not apply recursive ownership changes. If a path is not shared or writable, correct that configuration before retrying. On ordinary restart, the stored image is retained; use an explicit `--image IMAGE --migrate-runtime` to change it.
+
+To attach to a MiniLake managed elsewhere:
+
+```sh
+pond --minilake http://localhost:8000
+pond doctor --minilake http://localhost:8000
+```
+
+This mode needs no local container CLI. The external service owns start/stop, persistence, job execution and backups; the directory argument does not become a managed context and its seeds are not run. Settings shows this boundary. Remote managed engine endpoints are not supported; use an external MiniLake service instead.
+
+The implemented connection paths cover Docker-based providers and Podman. Live acceptance in this checkout has been run on Docker through Colima. Podman discovery, socket mapping, and lifecycle commands have fixture coverage, including operation without a Docker CLI. OrbStack, Rancher Desktop, native/rootless Linux engines, and real Podman still require live acceptance on the relevant platform before a qualified support claim. containerd/nerdctl and Apple container do not satisfy MiniLake's current Docker API execution contract and are not managed backends.
 
 ## Contexts
 
 Each directory is its own **context**, so data from different projects never mixes and you always know which one you're in:
 
 - **Data** lives in `<dir>/.pond/`, which contains its own `.gitignore` so git ignores it. Catalogs, Delta files, volumes, jobs, queries and secrets survive restarts.
-- **One MiniLake container** runs per context, named `pond-<name>-<hash>-minilake`, on its own Docker network, `pond-<name>-<hash>`. MiniLake's Spark job containers join that network, so they are scoped to the context and can call back into its MiniLake.
+- **One MiniLake container** runs per context on the selected engine, named `pond-<name>-<hash>-minilake`, on its own Docker network, `pond-<name>-<hash>`. MiniLake's Spark job containers join that network, so they are scoped to the context and can call back into its MiniLake.
 - **The URL is stable.** The context remembers its UI port, so an MCP registration keeps pointing at the same context. If another program holds that port, pond uses a free one for that run and tells you which MCP registrations won't reach it.
 - **One pond per context.** The running pond holds a lock on `.pond/lock`, so a second `pond` in the same directory points you at the first one instead of starting another lake.
 - **The context name is visible everywhere:** in the terminal banner, the UI's navigator and tabs (each context has its own colour), the browser tab title, the suggested MCP server name and WebMCP's `get_view` tool.
@@ -166,20 +206,22 @@ Whether shared or not, pond refuses requests to the lake that another web page s
 
 The UI is a workbench:
 
-- **The navigator** on the left lists each context with its tables (catalog → schema → table), saved queries, graphs and jobs, plus its files, workspace and settings. Filter it from the box at the top.
-- **Tabs** hold what you open: a table, a query, a graph, a job run. Following a link inside a tab replaces what it shows, and ⌘-click (Ctrl-click) opens a new tab instead. Tabs, and what is expanded in the navigator, survive a reload.
+- **The navigator** on the left lists each context with its tables (catalog → schema → table), saved queries, graphs and jobs, plus its files, scripts and settings. Filter it from the box at the top.
+- **Tabs** hold what you open: a table, a query, a graph, a job run. Following a link inside a tab replaces what it shows, and ⌘-click (Ctrl-click) opens a new tab instead. Tabs, query drafts, and what is expanded in the navigator survive a reload. **Reopen closed tab** restores recently closed items and their query drafts (up to 20). Selecting query history opens another tab instead of replacing the current editor.
 - **⌘K** (Ctrl-K) searches tables, saved queries, graphs and jobs across every context, and runs commands such as **New query**, **Import a file** or switching the theme.
-- **Activity**, on the right, lists what you and agents did in this page. It also holds the setting that lets agents delete or replace data without asking.
+- **Activity**, on the right, lists what you and agents did in this page. It shows the target context and confirmation setting for browser agents. External MCP clients use their own approval controls. Page activity clears on reload; it is not a server audit log.
 
 | Tab | What you can do |
 | --- | --- |
-| **Overview** | A context at a glance: its tables with row counts, recent queries, saved queries and graphs, recent runs, and how to connect an agent. Drop a file on it to import it. |
+| **Overview** | A context at a glance: tables, recent queries, saved queries and graphs, recent runs, and how to connect an agent. Use Count rows when needed. Drop a file on it to import it. |
 | **Tables** | Browse catalogs → schemas → tables and volumes. Create and drop catalogs, schemas and volumes; drop tables. Import CSV, TSV, JSON, JSON Lines or Parquet into a table by dropping a file (create, replace or append). Table pages show a preview, the columns and storage details, and can copy the table to another context. |
-| **Query** | A SQL editor with highlighting (⌘↵ runs, ⌘S saves), result grid, CSV export and the lake's query history. Each query tab keeps its own draft. MiniLake runs the DuckDB dialect, not Spark SQL. |
+| **Query** | A SQL editor with highlighting (⌘↵ runs, ⌘S saves), result grid, CSV export and the lake's query history. Each query tab keeps its own draft and saved-query identity. Save as keeps another version; Export definition writes a `pond-seed/*.pond.json`-compatible definition. MiniLake runs the DuckDB dialect, not Spark SQL. |
 | **Graph** | Explore relationships in your tables as an interactive network. See [Graphs](#graphs). |
-| **Jobs** | Write and run Python/PySpark scripts once, or save them as jobs and run them again. Runs show status, duration and output. |
-| **Files** | Browse the lake's files (DBFS and `/Volumes`): upload by drag and drop, create folders, download, delete, preview data files as tables, query a file in place or turn it into a table. Browse and edit workspace scripts, and run them. |
+| **Jobs** | Script and parameter drafts survive tab switches and reload. Save as new job and Export script keep another version. Write and run Python/PySpark scripts once, or save them as jobs and run them again. Runs show status, duration and output. |
+| **Files** | Browse the lake's files (DBFS and `/Volumes`): upload by drag and drop, create folders, download, delete, preview data files as tables, query a file in place or turn it into a table. Browse and edit workspace scripts under **Scripts**, export them, or use Save & run. Script drafts stay in this browser until saved. |
 | **Settings** | Context details, connecting an agent, SQL warehouses, secret scopes and keys, and resetting this context's lake. |
+
+Tab inserts one indent in SQL and Python editors. To leave an editor, press Escape then Tab, or use Shift+Tab. Graphs also have keyboard node search and text details; reduced-motion preferences stop automatic layout and camera animation.
 
 The theme follows your system; the button next to **Activity** switches between system, light and dark.
 
@@ -188,7 +230,7 @@ The theme follows your system; the button next to **Activity** switches between 
   <img alt="The Query tab with a saved SQL query joining the example tables, and its results grid" src="docs/images/query-light.png">
 </picture>
 
-Destructive actions (dropping, deleting folders, resetting) ask for confirmation. When a lot is at stake, you confirm by typing the object's name. If MiniLake stops responding, the page says so and reconnects by itself.
+Destructive actions (dropping, deleting folders, resetting) ask for confirmation. When a lot is at stake, you confirm by typing the object's name. Pond checks connection health after startup and during an outage. The page identifies Pond, MiniLake, or engine failures and retries. Unsaved editors are retained during recovery; known offline lake actions are disabled. A stopped engine or VM must be started by its owner.
 
 ### Known limitations
 
@@ -198,6 +240,8 @@ These come from MiniLake 1.9.1:
 - Run output appears only when the run finishes.
 
 ## Graphs
+
+Query history excludes tagged background previews and graph queries by default; **Include background queries** shows them. Overview counts rows only when requested. CSV export contains fetched rows; truncated results are labelled **Export fetched rows**. Drafts and layout are stored for this browser address, while saved objects and query/run history live in the lake.
 
 The **Graph** tab draws a network from your tables and analyses it. A graph is defined by SQL:
 
@@ -298,6 +342,14 @@ deno lint                    # UI linter, configured in deno.json
 deno check web/static/*.js web/static/views/*.js   # type-checks the UI modules
 go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 ```
+
+For an opt-in runtime check against a disposable managed context, run:
+
+```sh
+POND_RUNTIME_ACCEPTANCE_URL=http://localhost:PORT go test ./internal/server -run TestLiveRuntimeAcceptance -v
+```
+
+It writes synthetic data and starts a Spark job with the pinned Delta package. It checks shared script/data mounts, the job-to-MiniLake network callback, a Spark Delta write and a SQL Delta read. Images or packages can be downloaded by the selected runtime. Normal tests do not run this check. Repeat it for each provider/platform before claiming live support. Lifecycle, snapshot and browser checks are recorded in [the usability review](docs/usability-review.md).
 
 The graph tests compare every metric and grouping in the embedded runtime with the same fixtures in Node's JavaScript engine. For the optional live check, start an isolated context with the social seeds, save the graph as `Messaging` using the command above, and run `POND_GRAPH_ACCEPTANCE_URL=http://localhost:PORT go test ./internal/server -run TestLiveGraphAcceptance -v`. This check needs MiniLake 1.9.1 and includes large-graph scope and SQL path limits.
 
