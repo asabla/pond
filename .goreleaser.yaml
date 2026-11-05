@@ -1,0 +1,54 @@
+# Release config: run by .github/workflows/release.yml when a v* tag is pushed.
+# Check it locally with `goreleaser check`, and try a build with
+# `goreleaser release --snapshot --clean` (writes to dist/, publishes nothing).
+version: 2
+
+project_name: pond
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+homebrew_casks:
+  - name: pond
+    binaries: [pond]
+    directory: Casks
+    homepage: https://github.com/asabla/pond
+    description: A local data lake per directory, with a web UI and MCP endpoints
+    repository:
+      owner: asabla
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_msg_template: "chore: release pond {{ .Tag }}"
+    caveats: |
+      pond runs MiniLake in a container, so it needs a running Docker
+      (Docker Desktop, OrbStack or colima).
+    hooks:
+      post:
+        # The binary isn't signed or notarized; let macOS run it without the Gatekeeper prompt.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/pond"]
+          end

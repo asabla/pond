@@ -11,16 +11,26 @@ Use it to try out Databricks-style catalogs, Delta tables, SQL and PySpark jobs 
 
 ## Requirements
 
-- Go 1.25 or later, to build pond.
+- Go 1.25 or later, if you build pond yourself.
 - Docker, through Docker Desktop, OrbStack or colima. Pond runs MiniLake in a container.
 
 Pond is a single binary with the UI embedded. It has no other dependencies.
 
 ## Install
 
+With [Homebrew](https://brew.sh) on macOS:
+
+```sh
+brew install --cask asabla/tap/pond
+```
+
+Or with Go:
+
 ```sh
 go install github.com/asabla/pond@latest   # installs `pond` into $(go env GOPATH)/bin
 ```
+
+Prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/asabla/pond/releases).
 
 Or build from a checkout:
 
@@ -223,6 +233,8 @@ go test ./...                # Go tests use a fake docker CLI and fake MiniLake;
 node --test web/test/        # UI tests only (go test runs these too when node is installed)
 go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 ```
+
+Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases and updates the Homebrew cask in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap). CI runs the same tests on every push and pull request.
 
 The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`.
 
