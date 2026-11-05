@@ -1,0 +1,26 @@
+{
+  "queries": [
+    {
+      "name": "Messaging",
+      "sql": "SELECT sender AS source, recipient AS target, weight\nFROM demo.social.messages"
+    },
+    {
+      "name": "Team traffic",
+      "sql": "SELECT a.team AS source, b.team AS target, sum(m.weight) AS weight\nFROM demo.social.messages m\nJOIN demo.social.people a ON a.id = m.sender\nJOIN demo.social.people b ON b.id = m.recipient\nGROUP BY a.team, b.team"
+    }
+  ],
+  "graphs": [
+    {
+      "name": "Messaging",
+      "edges_sql": "SELECT sender AS source, recipient AS target, weight\nFROM demo.social.messages",
+      "nodes_sql": "SELECT id, name AS label, team, city, joined\nFROM demo.social.people",
+      "directed": true
+    },
+    {
+      "name": "Team traffic",
+      "edges_sql": "SELECT a.team AS source, b.team AS target, sum(m.weight) AS weight\nFROM demo.social.messages m\nJOIN demo.social.people a ON a.id = m.sender\nJOIN demo.social.people b ON b.id = m.recipient\nGROUP BY a.team, b.team",
+      "nodes_sql": "SELECT DISTINCT team AS id, team AS label\nFROM demo.social.people",
+      "directed": true
+    }
+  ]
+}

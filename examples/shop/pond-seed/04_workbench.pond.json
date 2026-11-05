@@ -1,0 +1,26 @@
+{
+  "queries": [
+    {
+      "name": "Customer purchases",
+      "sql": "SELECT 'customer:' || CAST(customer_id AS VARCHAR) AS source,\n       'product:' || CAST(product_id AS VARCHAR) AS target,\n       sum(quantity) AS weight\nFROM shop.sales.orders\nGROUP BY customer_id, product_id"
+    },
+    {
+      "name": "Products bought together",
+      "sql": "WITH purchases AS (\n  SELECT DISTINCT customer_id, product_id FROM shop.sales.orders\n)\nSELECT a.product_id AS source, b.product_id AS target, count(*) AS weight\nFROM purchases a\nJOIN purchases b ON a.customer_id = b.customer_id AND a.product_id < b.product_id\nGROUP BY a.product_id, b.product_id"
+    }
+  ],
+  "graphs": [
+    {
+      "name": "Customer purchases",
+      "edges_sql": "SELECT 'customer:' || CAST(customer_id AS VARCHAR) AS source,\n       'product:' || CAST(product_id AS VARCHAR) AS target,\n       sum(quantity) AS weight\nFROM shop.sales.orders\nGROUP BY customer_id, product_id",
+      "nodes_sql": "SELECT DISTINCT 'customer:' || CAST(customer_id AS VARCHAR) AS id,\n       'Customer ' || CAST(customer_id AS VARCHAR) AS label,\n       'customer' AS kind, CAST(NULL AS VARCHAR) AS category\nFROM shop.sales.orders\nUNION ALL\nSELECT 'product:' || CAST(product_id AS VARCHAR) AS id,\n       name AS label, 'product' AS kind, category\nFROM shop.sales.products",
+      "directed": true
+    },
+    {
+      "name": "Products bought together",
+      "edges_sql": "WITH purchases AS (\n  SELECT DISTINCT customer_id, product_id FROM shop.sales.orders\n)\nSELECT a.product_id AS source, b.product_id AS target, count(*) AS weight\nFROM purchases a\nJOIN purchases b ON a.customer_id = b.customer_id AND a.product_id < b.product_id\nGROUP BY a.product_id, b.product_id",
+      "nodes_sql": "SELECT product_id AS id, name AS label, category, price\nFROM shop.sales.products",
+      "directed": false
+    }
+  ]
+}

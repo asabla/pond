@@ -97,6 +97,16 @@ func (f *fakeLake) RunPython(ctx context.Context, name, path, _ string) (*lake.R
 	return &r, nil
 }
 
+func (f *fakeLake) SeedArtifacts(_ context.Context, artifacts SavedArtifacts) error {
+	for _, query := range artifacts.Queries {
+		f.calls = append(f.calls, "query: "+query.Name)
+	}
+	for _, def := range artifacts.Graphs {
+		f.calls = append(f.calls, "graph: "+def.Name)
+	}
+	return nil
+}
+
 func project(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -131,6 +141,38 @@ func TestRunsFilesInNameOrder(t *testing.T) {
 	}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("calls %q\nwant %q", f.calls, want)
+	}
+}
+
+func TestSavedArtifactFilesAndExistingContexts(t *testing.T) {
+	dir := project(t, map[string]string{
+		"01.sql":                 "CREATE TABLE example AS SELECT 1",
+		"04_workbench.pond.json": `{"queries":[{"name":"Edges","sql":"SELECT 1,2"}],"graphs":[{"name":"Network","edges_sql":"SELECT 1,2"}]}`,
+		"data.json":              `{"input":"ignored"}`,
+	})
+	f := &fakeLake{}
+	if err := Run(context.Background(), f, dir, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.calls, []string{"sql: CREATE TABLE example AS SELECT 1", "query: Edges", "graph: Network"}) {
+		t.Fatalf("calls: %v", f.calls)
+	}
+	f.calls = nil
+	if err := EnsureArtifacts(context.Background(), f, dir, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.calls, []string{"query: Edges", "graph: Network"}) {
+		t.Fatalf("existing context ran table seeds: %v", f.calls)
+	}
+}
+
+func TestInvalidArtifactManifest(t *testing.T) {
+	for _, body := range []string{`{}`, `{"unknown":true}`, `{"queries":[{"name":"","sql":"SELECT 1"}]}`, `{"graphs":[{"name":"g"}]}`, `{} {}`} {
+		dir := project(t, map[string]string{"04_workbench.pond.json": body})
+		err := Run(context.Background(), &fakeLake{}, dir, func(string, ...any) {})
+		if err == nil || !strings.Contains(err.Error(), "04_workbench.pond.json") {
+			t.Fatalf("accepted %q: %v", body, err)
+		}
 	}
 }
 

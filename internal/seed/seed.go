@@ -1,7 +1,8 @@
 // Package seed fills a fresh lake from scripts committed next to the project.
 //
 // Seeds generate their data rather than ship it: `pond-seed/` holds `.sql` and `.py`
-// files that run in name order. SQL files may hold several statements, and may create
+// files that run in name order. Saved graphs and queries come from .pond.json files.
+// SQL files may hold several statements, and may create
 // catalogs with `CREATE CATALOG [IF NOT EXISTS] name`, which pond runs through Unity
 // Catalog because MiniLake's DuckDB has no such statement. Python files run as one-off
 // jobs, so they can use PySpark.
@@ -33,6 +34,7 @@ type Lake interface {
 	CreateCatalog(ctx context.Context, name string, ifNotExists bool) error
 	CreateSchema(ctx context.Context, catalog, name string, ifNotExists bool) error
 	RunPython(ctx context.Context, name, path, source string) (*lake.RunResult, error)
+	SeedArtifacts(ctx context.Context, artifacts SavedArtifacts) error
 }
 
 // Files returns the seed scripts in dir in the order they run, or nil when there are none.
@@ -46,7 +48,7 @@ func Files(dir string) ([]string, error) {
 	}
 	var files []string
 	for _, e := range entries {
-		if ext := filepath.Ext(e.Name()); !e.IsDir() && (ext == ".sql" || ext == ".py") {
+		if ext := filepath.Ext(e.Name()); !e.IsDir() && (ext == ".sql" || ext == ".py" || strings.HasSuffix(e.Name(), ".pond.json")) {
 			files = append(files, filepath.Join(dir, Dir, e.Name()))
 		}
 	}
@@ -72,9 +74,12 @@ func Run(ctx context.Context, l Lake, dir string, logf func(string, ...any)) err
 		if err != nil {
 			return err
 		}
-		if filepath.Ext(name) == ".sql" {
+		switch {
+		case strings.HasSuffix(name, ".pond.json"):
+			err = runArtifacts(ctx, l, src)
+		case filepath.Ext(name) == ".sql":
 			err = runSQL(ctx, l, string(src))
-		} else {
+		default:
 			err = runPython(ctx, l, name, string(src))
 		}
 		if err != nil {

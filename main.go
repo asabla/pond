@@ -63,8 +63,9 @@ Flags for logs:
   --tail N       lines to show from the end (default: 200, "all" for everything)
 
 A new context runs the .sql and .py files in DIR/pond-seed/ in name order, so a project
-can generate its sample data instead of shipping it. export and import need the context
-stopped (pond down).
+can generate its sample data instead of shipping it. .pond.json files add missing saved
+queries and graphs on every start, keeping existing definitions. export and import need
+the context stopped (pond down).
 `
 )
 
@@ -447,7 +448,8 @@ func up(a *args) error {
 	// Stop seeding when up returns for any reason, before the deferred cleanup stops MiniLake.
 	seedCtx, stopSeeding := context.WithCancel(sig)
 	defer stopSeeding()
-	if c != nil && fresh {
+	switch {
+	case c != nil && fresh:
 		go func() {
 			if err := seedLake(seedCtx, client, *c); err != nil && seedCtx.Err() == nil {
 				logf("! %v", err)
@@ -455,9 +457,15 @@ func up(a *args) error {
 				logf("  or `pond seed` to run every script again if they can safely run twice.")
 			}
 		}()
-	} else if c != nil && exists(c.SeedMarker()) {
+	case c != nil && exists(c.SeedMarker()):
 		logf("! Seeding didn't finish last time, so this lake may be half seeded. Run `pond reset`")
 		logf("  to start over, or `pond seed` if the scripts can safely run twice.")
+	case c != nil:
+		go func() {
+			if err := seed.EnsureArtifacts(seedCtx, seed.NewTarget(client), c.Dir, logf); err != nil && seedCtx.Err() == nil {
+				logf("! %v", err)
+			}
+		}()
 	}
 	select {
 	case <-sig.Done():
@@ -601,7 +609,7 @@ func seedContext(a *args) error {
 	}
 	if files, err := seed.Files(c.Dir); err != nil || len(files) == 0 {
 		if err == nil {
-			err = fmt.Errorf("no .sql or .py files in %s", filepath.Join(c.Dir, seed.Dir))
+			err = fmt.Errorf("no .sql, .py or .pond.json files in %s", filepath.Join(c.Dir, seed.Dir))
 		}
 		return err
 	}
@@ -628,7 +636,7 @@ func seedLake(ctx context.Context, client *lake.Client, c pondctx.Context) error
 	if err := os.WriteFile(c.SeedMarker(), nil, 0o644); err != nil {
 		return err
 	}
-	if err := seed.Run(ctx, client, c.Dir, logf); err != nil {
+	if err := seed.Run(ctx, seed.NewTarget(client), c.Dir, logf); err != nil {
 		return err
 	}
 	os.Remove(c.SeedMarker())
