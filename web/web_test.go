@@ -28,7 +28,11 @@ func TestUI(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	out, err := exec.Command(node, "--test", "test/").CombinedOutput()
+	files, err := filepath.Glob("test/*.test.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, append([]string{"--test"}, files...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node --test failed: %v\n%s", err, out)
 	}

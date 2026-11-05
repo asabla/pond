@@ -84,6 +84,18 @@ test("runSql surfaces MiniLake's error message and code", async () => {
   await assert.rejects(lake.runSql("SELEC 1"), (err) => err instanceof lake.LakeError && err.message === "Parser Error: nope" && err.code === "INVALID_REQUEST");
 });
 
+test("runSql follows result chunks and preserves large integer ids", async () => {
+  routes["GET /pond/config"] = () => [200, { warehouse_id: "w" }];
+  routes["POST /api/2.0/sql/statements"] = () => [200, '{"statement_id":"s","status":{"state":"SUCCEEDED"},"manifest":{"total_row_count":2,"schema":{"columns":[{"name":"id","type_text":"BIGINT"}]}},"result":{"data_array":[[9007199254740993]],"next_chunk_index":1}}'];
+  routes["GET /api/2.0/sql/statements/s/result/chunks/1"] = () => [200, '{"data_array":[[9007199254740995]]}'];
+  await lake.config({ refresh: true });
+  const result = await lake.runSql("SELECT id FROM t");
+  assert.deepEqual(result.rows, [["9007199254740993"], ["9007199254740995"]]);
+  assert.equal(result.truncated, false);
+  routes["GET /api/2.0/sql/statements/s/result/chunks/1"] = () => [200, { data_array: [], truncated: true }];
+  assert.equal((await lake.runSql("SELECT id FROM t")).truncated, true);
+});
+
 test("runSql sends CREATE CATALOG and CREATE SCHEMA to Unity Catalog", async () => {
   const catalogs = [];
   const schemas = [];

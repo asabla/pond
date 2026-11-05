@@ -6,6 +6,8 @@
 // "/ctx/<id>" another running context, reached through this pond. The module's own exports
 // are the client for this pond's context.
 
+import { parseJSON } from "./graph.js";
+
 const UC = "/api/2.1/unity-catalog";
 const JOBS = "/api/2.2/jobs";
 const POLL_MS = 250;
@@ -44,7 +46,7 @@ export function createLake(base = "") {
     const text = await res.text();
     let data = {};
     try {
-      data = text ? JSON.parse(text) : {};
+      data = text ? (path.startsWith("/api/2.0/sql/statements") ? parseJSON(text) : JSON.parse(text)) : {};
     } catch {
       data = { message: text };
     }
@@ -149,12 +151,32 @@ export function createLake(base = "") {
       throw new LakeError(res.status?.error?.message || `Statement ${res.status?.state}`, res.status?.error?.error_code);
     }
 
+    const rows = [...(res.result?.data_array ?? [])];
+    let truncated = Boolean(res.manifest?.truncated || res.result?.truncated);
+    let chunk = res.result;
+    const seen = new Set([0]);
+    const rowBytes = (data) => new TextEncoder().encode(JSON.stringify(data)).byteLength;
+    let bytes = rowBytes(rows);
+    truncated ||= rows.length > 60000 || bytes > 32 * 1024 * 1024;
+    while (chunk?.next_chunk_index != null) {
+      const index = chunk.next_chunk_index;
+      if (seen.has(index) || !Number.isInteger(index) || index < 0) throw new LakeError("SQL result repeats an invalid chunk", "INCOMPLETE_RESULT");
+      seen.add(index);
+      chunk = await call("GET", `/api/2.0/sql/statements/${enc(res.statement_id)}/result/chunks/${index}`);
+      const next = chunk.data_array ?? [];
+      bytes += rowBytes(next);
+      if (rows.length + next.length > 60000 || bytes > 32 * 1024 * 1024) { truncated = true; break; }
+      rows.push(...next);
+      truncated ||= Boolean(chunk.truncated);
+    }
+    truncated ||= Boolean(chunk?.next_chunk_internal_link && chunk.next_chunk_index == null);
+    truncated ||= res.manifest?.total_row_count != null && Number(res.manifest.total_row_count) !== rows.length;
     const columns = (res.manifest?.schema?.columns ?? []).map((c) => ({ name: c.name, type: c.type_text }));
     return {
       statementId: res.statement_id,
       columns,
-      rows: res.result?.data_array ?? [],
-      truncated: Boolean(res.manifest?.truncated || res.result?.truncated),
+      rows,
+      truncated,
       elapsedMs: Math.round(performance.now() - started),
     };
   }

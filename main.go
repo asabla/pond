@@ -47,6 +47,7 @@ Usage:
   pond reset [DIR] [--yes]  delete the context's lake data, then seed it again
   pond export [DIR] [-o FILE]       write the lake's data to a .tar.gz snapshot
   pond import FILE [DIR] [--yes]    replace the lake's data with a snapshot
+  pond graph COMMAND [flags]       analyse graphs in a running context (graph --help for commands)
   pond version              print the version
 
 Flags for up:
@@ -81,9 +82,10 @@ type args struct {
 	yes          bool
 	output       string
 	file         string
+	graph        *graphArgs
 }
 
-var commands = []string{"up", "ls", "down", "open", "logs", "seed", "reset", "export", "import", "version"}
+var commands = []string{"up", "ls", "down", "open", "logs", "seed", "reset", "export", "import", "version", "graph"}
 
 var errHelp = errors.New("help requested")
 
@@ -91,6 +93,10 @@ func logf(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
 
 func main() {
 	a, err := parse(os.Args[1:])
+	if errors.Is(err, errGraphHelp) {
+		fmt.Print(graphUsage)
+		return
+	}
 	if errors.Is(err, errHelp) {
 		fmt.Print(usage)
 		return
@@ -120,6 +126,8 @@ func main() {
 		err = importSnapshot(a)
 	case "version":
 		fmt.Println("pond", version)
+	case "graph":
+		err = graphCommand(a.graph, os.Stdout)
 	}
 	if err != nil {
 		logf("pond: %v", err)
@@ -128,6 +136,9 @@ func main() {
 }
 
 func parse(argv []string) (*args, error) {
+	if len(argv) > 0 && argv[0] == "graph" {
+		return parseGraph(argv[1:])
+	}
 	// Bare `pond` and `pond <dir>` mean `pond up`.
 	if len(argv) == 0 || !slices.Contains(append(commands, "-h", "--help"), argv[0]) {
 		argv = append([]string{"up"}, argv...)
@@ -379,6 +390,7 @@ func up(a *args) error {
 	srv = &http.Server{Handler: server.New(server.Options{
 		Host: a.host, AllowedHosts: allowedHosts, Lake: client, Context: ctxInfo, DataRoot: dataRoot,
 		Static: static, Version: version, Peers: peers(c),
+		Lifecycle: sig,
 	}),
 		// Bounds only the request headers; bodies and MCP streams can take as long as they need.
 		ReadHeaderTimeout: 10 * time.Second,

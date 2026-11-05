@@ -213,15 +213,51 @@ Graphs with up to 30,000 edges load in full, and every metric is exact. Bigger g
 
 The graph libraries ([sigma.js](https://www.sigmajs.org) and [graphology](https://graphology.github.io)) ship inside pond and load the first time you open the tab, so graphs work offline. Their licences are in `web/static/vendor/LICENSES.md`.
 
+### Graph commands
+
+The CLI and MCP use the same graph analysis code as the browser. No open browser or Node.js installation is needed. Start Pond, then run graph commands from the context directory. Use `--dir PATH` for another running directory, or `--url URL` for another Pond server. These options cannot be combined. Commands do not start or stop containers.
+
+For the social example, the edge columns are `sender`, `recipient` and `weight`:
+
+```sh
+pond graph save Messaging --dir examples/social \
+  --edges-table demo.social.messages --source sender --target recipient --weight weight \
+  --nodes-table demo.social.people --node-id id --label name
+pond graph list --dir examples/social
+pond graph show Messaging --dir examples/social
+pond graph stats Messaging --dir examples/social
+pond graph metrics Messaging pagerank --top 10 --dir examples/social
+pond graph metrics Messaging community --json --dir examples/social
+pond graph neighbors Messaging --node 0 --dir examples/social
+pond graph path Messaging --from 0 --to 25 --dir examples/social
+pond graph open Messaging --dir examples/social
+```
+
+`save` also accepts `--edges-sql-file FILE` with optional `--nodes-sql-file FILE`, or `--definition FILE` containing the existing JSON graph format. Choose one input form. Table and SQL input is directed by default; use `--undirected` for undirected edges. A JSON definition supplies its own direction (omitting `directed` means true). Replacing a saved definition requires `--replace`. Analysis commands accept `--definition FILE` instead of a saved name, for example `pond graph metrics pagerank --definition graph.json`. Saved definitions stay in `/pond/graphs/` and appear in the browser when its list refreshes.
+
+Use `--json` for one result object on stdout. Errors go to stderr. Without this option, results use labelled text. `--timeout` sets the client deadline (default `60s`); server analysis also has a 60-second limit, including queue time. Exit codes are 0 for success, 1 for an operation failure and 2 for invalid arguments. A completed search with no path is successful and returns `result: null`.
+
+Available metrics are `degree`, `in_degree`, `out_degree`, `pagerank`, `betweenness`, `closeness`, `eigenvector`, `hub`, `authority` and `clustering`. Groupings are `community`, `component`, `strong_component` and `attr:COLUMN`. Rankings and group summaries return the top 10 by default, with `--top` from 1 to 100. Node arguments are exact IDs, not labels. Neighbour lists return up to 200 entries per direction and report truncation.
+
+CLI and MCP analysis require a complete graph by default. The limits are 30,000 source edge rows, 60,000 nodes including isolated nodes, and 32 MiB of row data. A limit or incomplete SQL result causes an error. Use `--scope overview` explicitly to analyse a limited graph selected by the browser's overview rules. Results identify the scope, loaded source rows, merged edges, loaded nodes, total source edge rows and limits. Repeated source/target pairs merge; their weights add when the graph has a weight column.
+
+Paths use non-negative weights as distances on complete weighted graphs. Use `--unweighted` to minimise hops. For graphs above the edge limit, `--unweighted` is required and paths search the full graph through SQL, within 20 hops and a 20,000-node frontier. A search limit is an error, not evidence that no path exists. An overview path is never used as proof of the shortest path through the full graph.
+
+The CLI uses `GET /pond/graphs`, `GET/PUT /pond/graphs/{name}` and `POST /pond/graph/{stats|metrics|neighbors|path}`. Save bodies contain `definition` and `replace`. Analysis bodies contain exactly one of `name` or `definition`, plus operation options (`scope`, `metric`, `top`, `node`, `from`, `to`, `unweighted`). Definition reads and saves return a definition and a browser route; the CLI and MCP turn that route into a full URL.
+
 ## Agents
 
 ### MCP (Claude Code, Claude Desktop, Codex and other MCP clients)
 
-`/mcp` is the context's MiniLake MCP server, with its tools, resources and prompts, forwarded through pond. Register one server per context:
+`/mcp` combines Pond's graph tools with MiniLake's tools, resources and prompts. Register one server per context:
 
 ```sh
 claude mcp add --transport http pond-my-project http://localhost:8700/mcp
 ```
+
+Pond adds `pond_graph_list`, `pond_graph_get`, `pond_graph_save`, `pond_graph_stats`, `pond_graph_metrics`, `pond_graph_neighbors` and `pond_graph_path`. Analysis tools take either a saved `name` or an inline `definition`; they do not use the browser's current graph. `pond_graph_save` takes `definition` and requires `replace: true` to overwrite an existing name. Limits and result scope match the CLI. Get and save return the graph's browser URL.
+
+MiniLake tool names, schemas, resource URIs and prompts are preserved. Each client has a separate upstream session. Reconnect after upgrading Pond to discover the new tools; the registration URL stays the same. If MiniLake MCP is disabled, Pond's graph tools still use MiniLake's REST API. `/pond/config` reports Pond MCP in `mcp` and upstream availability in `minilake_mcp`.
 
 ### WebMCP (agents in the browser)
 
@@ -251,26 +287,30 @@ In browsers without native WebMCP, load a WebMCP polyfill (for example MCP-B's `
 ```sh
 go run . ~/some/dir          # run from a checkout
 go test ./...                # Go tests use a fake docker CLI and fake MiniLake; no daemon needed
-node --test web/test/        # UI tests only (go test runs these too when node is installed)
+node --test web/test/*.test.js # UI tests only (go test runs these too when node is installed)
 golangci-lint run            # Go linters, configured in .golangci.yml
 deno lint                    # UI linter, configured in deno.json
 deno check web/static/*.js web/static/views/*.js   # type-checks the UI modules
 go build -ldflags "-X main.version=$(git describe --tags --always)" -o pond .
 ```
 
+The graph tests compare every metric and grouping in the embedded runtime with the same fixtures in Node's JavaScript engine. For the optional live check, start an isolated context with the social seeds, save the graph as `Messaging` using the command above, and run `POND_GRAPH_ACCEPTANCE_URL=http://localhost:PORT go test ./internal/server -run TestLiveGraphAcceptance -v`. This check needs MiniLake 1.9.1 and includes large-graph scope and SQL path limits.
+
 Pushing a `v*` tag runs the tests, then [GoReleaser](https://goreleaser.com) publishes binaries to GitHub Releases, with the Homebrew cask `pond.rb` attached. Copy it into `Casks/` in [asabla/homebrew-tap](https://github.com/asabla/homebrew-tap) to update `brew install`. CI runs the same tests, plus the linters and `govulncheck`, on every push and pull request.
 
 The UI is embedded in the binary, so UI changes need a rebuild (`go build`) or a fresh `go run`. While working on it, set `POND_UI_DIR=web/static` and pond serves the UI from disk instead, so a reload shows your changes.
 
 ```
-main.go                      CLI: up, ls, down, open, logs, seed, reset, export, import, version
+main.go, graph_cli.go        context commands and graph analysis CLI
 internal/pondctx/            per-directory contexts: containers, network, lock, .pond/ data and snapshots
-internal/server/             embedded UI, MiniLake proxy (/api, /_minilake, /mcp), /pond/config, other contexts (/pond/contexts, /ctx/<id>/)
+internal/server/             embedded UI, REST proxy, combined MCP, graph API, /pond/config, other contexts
+internal/graph/              shared JavaScript runtime, graph loading, saved definitions and analysis
 internal/lake/               MiniLake calls pond makes itself: warehouse, SQL, catalogs, runs, reset
 internal/seed/               runs pond-seed/ scripts
 web/static/                  UI: plain HTML/CSS/JS modules, no build step
   lake.js                    MiniLake API client, shared by UI and WebMCP
-  graph.js                   graph definitions, SQL builders and metrics, shared by UI and WebMCP
+  graph-core.js              graph definitions, SQL builders and analysis, shared with the server
+  graph.js                   browser module exports and saved graph file access
   workbench.js               shell: contexts, navigator, tabs, ⌘K palette, activity, routing
   editor.js                  code editor with SQL and Python highlighting
   sql.js                     quote-aware SQL scanner: statements, destructive SQL

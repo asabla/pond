@@ -257,6 +257,36 @@ func TestConfigReportsMCPAndVersion(t *testing.T) {
 	}
 }
 
+func TestGraphHTTPValidationAndHostChecks(t *testing.T) {
+	e := setup(t, nil, "")
+	for _, tc := range []struct {
+		method, path string
+		body         any
+		status       int
+	}{
+		{"GET", "/pond/graphs", nil, http.StatusOK},
+		{"GET", "/pond/graphs/missing", nil, http.StatusBadRequest},
+		{"POST", "/pond/graph/stats", map[string]any{}, http.StatusBadRequest},
+		{"POST", "/pond/graph/stats", map[string]any{"unexpected": true}, http.StatusBadRequest},
+		{"DELETE", "/pond/graphs/name", nil, http.StatusMethodNotAllowed},
+	} {
+		resp, body := e.request(tc.method, tc.path, tc.body, nil)
+		if resp.StatusCode != tc.status {
+			t.Errorf("%s %s: %d %s", tc.method, tc.path, resp.StatusCode, body)
+		}
+	}
+	req, _ := http.NewRequest(http.MethodGet, e.pond.URL+"/pond/graphs", nil)
+	req.Host = "foreign.example"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign Host accepted: %d", resp.StatusCode)
+	}
+}
+
 func TestConfigIncludesContextAndDataRoot(t *testing.T) {
 	if cfg := setup(t, nil, "").config(); cfg["context"] != nil || cfg["data_root"] != nil {
 		t.Errorf("unmanaged config = %v", cfg)
@@ -274,7 +304,7 @@ func TestConfigReportsUnreachableLake(t *testing.T) {
 	e := setup(t, nil, "")
 	e.upstream.Close()
 	cfg := e.config()
-	if cfg["warehouse_id"] != nil || cfg["mcp"] != nil || cfg["error"] == nil {
+	if cfg["warehouse_id"] != nil || cfg["mcp"] != true || cfg["error"] == nil {
 		t.Errorf("config = %v", cfg)
 	}
 }
@@ -290,39 +320,6 @@ func TestProxiesUpstreamErrors(t *testing.T) {
 	resp, body := setup(t, nil, "").request("GET", "/api/2.1/unity-catalog/nope", nil, nil)
 	if resp.StatusCode != http.StatusNotFound || strings.TrimSpace(string(body)) != `{"detail":"Not Found"}` {
 		t.Errorf("got %d %s", resp.StatusCode, body)
-	}
-}
-
-func TestProxiesMCPStreamAndHeaders(t *testing.T) {
-	e := setup(t, nil, "")
-	e.fake.release = make(chan struct{})
-	req, _ := http.NewRequest(http.MethodPost, e.pond.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Origin", e.pond.URL) // the UI itself
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("mcp-session-id") != "abc" {
-		t.Fatalf("got %d, session %q", resp.StatusCode, resp.Header.Get("mcp-session-id"))
-	}
-	// The first event must arrive while the upstream is still holding the stream open.
-	br := bufio.NewReader(resp.Body)
-	line, err := br.ReadString('\n')
-	if err != nil || line != "event: message\n" {
-		t.Fatalf("first line %q, %v", line, err)
-	}
-	close(e.fake.release)
-	rest, _ := io.ReadAll(br)
-	if !strings.Contains(string(rest), "data: second") {
-		t.Errorf("rest = %q", rest)
-	}
-	e.fake.mu.Lock()
-	defer e.fake.mu.Unlock()
-	if got := e.fake.seen[len(e.fake.seen)-1].headers; got.Get("Origin") != "" {
-		t.Errorf("Origin forwarded: %v", got)
 	}
 }
 
@@ -358,13 +355,15 @@ func TestRefusesRequestsFromOtherSites(t *testing.T) {
 		headers map[string]string
 		want    int
 	}{
-		"other site":             {"/_minilake/reset", map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
-		"other localhost port":   {"/api/2.0/sql/statements", map[string]string{"Origin": "http://localhost:3000"}, http.StatusForbidden},
-		"opaque origin":          {"/mcp", map[string]string{"Origin": "null"}, http.StatusForbidden},
-		"no-cors without Origin": {"/_minilake/health", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
-		"the UI itself":          {"/_minilake/health", map[string]string{"Origin": "http://" + same, "Sec-Fetch-Site": "same-origin"}, http.StatusOK},
-		"no browser headers":     {"/_minilake/health", nil, http.StatusOK},
-		"link to the UI":         {"/", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusOK},
+		"other site":                 {"/_minilake/reset", map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
+		"other localhost port":       {"/api/2.0/sql/statements", map[string]string{"Origin": "http://localhost:3000"}, http.StatusForbidden},
+		"opaque origin":              {"/mcp", map[string]string{"Origin": "null"}, http.StatusForbidden},
+		"graph from other site":      {"/pond/graph/stats", map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
+		"graph list from other port": {"/pond/graphs", map[string]string{"Sec-Fetch-Site": "same-site"}, http.StatusForbidden},
+		"no-cors without Origin":     {"/_minilake/health", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+		"the UI itself":              {"/_minilake/health", map[string]string{"Origin": "http://" + same, "Sec-Fetch-Site": "same-origin"}, http.StatusOK},
+		"no browser headers":         {"/_minilake/health", nil, http.StatusOK},
+		"link to the UI":             {"/", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusOK},
 	} {
 		if resp, body := e.request("GET", tc.path, nil, tc.headers); resp.StatusCode != tc.want {
 			t.Errorf("%s: got %d %s, want %d", name, resp.StatusCode, body, tc.want)

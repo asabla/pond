@@ -1,10 +1,9 @@
-// Package server serves the static UI and proxies everything MiniLake owns
-// (`/api`, `/_minilake`, `/mcp`) to the MiniLake process. Proxying keeps the
-// browser same-origin and gives MCP clients a single URL for both the UI and
-// the tools.
+// Package server serves the UI, graph API and combined MCP endpoint, and proxies
+// MiniLake's REST APIs to keep browser requests on the same origin.
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -20,10 +19,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asabla/pond/internal/graph"
 	"github.com/asabla/pond/internal/lake"
 )
 
-var proxyPrefixes = []string{"/api/", "/_minilake/", "/mcp"}
+var proxyPrefixes = []string{"/api/", "/_minilake/"}
 
 // Options configures the handler New returns.
 type Options struct {
@@ -36,7 +36,8 @@ type Options struct {
 	Static       fs.FS
 	Version      string
 	// Peers lists the contexts the UI can switch to, this one included. Nil means none.
-	Peers func() []Peer
+	Peers     func() []Peer
+	Lifecycle context.Context // stops active MCP sessions when the server shuts down
 }
 
 // Peer is a context the UI can open alongside this one.
@@ -59,10 +60,11 @@ type handler struct {
 	allowed   map[string]bool
 	proxy     *httputil.ReverseProxy
 	transport *http.Transport
+	graphs    *graph.Service
+	mcp       http.Handler
 }
 
-// New returns pond's HTTP handler: the embedded UI, /pond/config, and a proxy to
-// MiniLake for /api, /_minilake and /mcp. It refuses requests for unknown hosts.
+// New returns Pond's HTTP handler. It refuses requests for unknown hosts.
 func New(o Options) http.Handler {
 	target := o.Lake.Target()
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
@@ -96,6 +98,8 @@ func New(o Options) http.Handler {
 	for _, name := range o.AllowedHosts {
 		h.allowed[strings.ToLower(strings.Trim(name, "[]"))] = true
 	}
+	h.graphs = graph.New(o.Lake)
+	h.mcp = h.newMCP()
 	if os.Getenv("POND_VERBOSE") != "" {
 		return logging(h)
 	}
@@ -123,6 +127,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := r.URL.Path
+	if p == "/mcp" || p == "/mcp/" || p == "/pond/graphs" || strings.HasPrefix(p, "/pond/graphs/") || strings.HasPrefix(p, "/pond/graph/") {
+		if reason := crossSite(r); reason != "" {
+			sendJSON(w, http.StatusForbidden, map[string]string{"error_code": "FORBIDDEN", "message": reason})
+			return
+		}
+	}
 	if p == "/pond/contexts" || strings.HasPrefix(p, "/ctx/") {
 		if reason := crossSite(r); reason != "" {
 			sendJSON(w, http.StatusForbidden, map[string]string{"error_code": "FORBIDDEN", "message": reason})
@@ -146,6 +156,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch {
+	case p == "/mcp" || p == "/mcp/":
+		h.mcp.ServeHTTP(w, r)
+	case p == "/pond/graphs" || strings.HasPrefix(p, "/pond/graphs/") || strings.HasPrefix(p, "/pond/graph/"):
+		h.graphHTTP(w, r)
 	case p == "/pond/config" && r.Method == http.MethodGet:
 		h.config(w, r)
 	case r.Method == http.MethodGet || r.Method == http.MethodHead:
@@ -262,12 +276,16 @@ func (h *handler) config(w http.ResponseWriter, r *http.Request) {
 		Context     any     `json:"context"`
 		WarehouseID *string `json:"warehouse_id"`
 		MCP         *bool   `json:"mcp"`
+		MinilakeMCP bool    `json:"minilake_mcp"`
 		Error       *string `json:"error"`
 		Version     string  `json:"version"`
 		DataRoot    *string `json:"data_root"`
 		Home        string  `json:"home,omitempty"` // shortens paths to ~ in the UI
 	}{MinilakeURL: h.Lake.URL(), Context: h.Context, Version: h.Version}
 	out.Home, _ = os.UserHomeDir()
+	available := true
+	out.MCP = &available
+	out.MinilakeMCP = h.Lake.MCPEnabled(r.Context())
 	if h.DataRoot != "" {
 		out.DataRoot = &h.DataRoot
 	}
@@ -275,8 +293,7 @@ func (h *handler) config(w http.ResponseWriter, r *http.Request) {
 		msg := err.Error()
 		out.Error = &msg
 	} else {
-		mcp := h.Lake.MCPEnabled(r.Context())
-		out.WarehouseID, out.MCP = &id, &mcp
+		out.WarehouseID = &id
 	}
 	sendJSON(w, http.StatusOK, out)
 }

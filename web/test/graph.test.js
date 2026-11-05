@@ -5,6 +5,12 @@ import * as g from "../static/graph.js";
 
 const def0 = { edges_sql: "SELECT * FROM t" };
 
+test("SQL JSON keeps large integer ids exact without changing strings or decimals", () => {
+  const parsed = g.parseJSON('{"rows":[[9007199254740993,-9007199254740995,9007199254740991,1.25,1e16]],"label":"9007199254740993 \\"quoted\\""}');
+  assert.deepEqual(parsed.rows[0], ["9007199254740993", "-9007199254740995", 9007199254740991, 1.25, 1e16]);
+  assert.equal(parsed.label, '9007199254740993 "quoted"');
+});
+
 test("definitions need edge SQL and a safe name, and lose trailing semicolons", () => {
   assert.match(g.validateDefinition({}), /edges_sql/);
   assert.match(g.validateDefinition({ name: "../x", edges_sql: "SELECT 1, 2" }), /names/);

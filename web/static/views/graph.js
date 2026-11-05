@@ -13,24 +13,7 @@ const TABLE_ROWS = 1000;
 const LABELS_KEY = "pond.graphLabels";
 
 // Metrics a node can be sized or ranked by. `heavy` ones say so before running on big graphs.
-export const METRICS = {
-  degree: { label: "Degree" },
-  in_degree: { label: "In-degree", directed: true },
-  out_degree: { label: "Out-degree", directed: true },
-  pagerank: { label: "PageRank" },
-  betweenness: { label: "Betweenness", heavy: true },
-  closeness: { label: "Closeness", heavy: true },
-  eigenvector: { label: "Eigenvector" },
-  hub: { label: "Hub score (HITS)", directed: true },
-  authority: { label: "Authority score (HITS)", directed: true },
-  clustering: { label: "Clustering coefficient" },
-};
-// Groupings a node can be coloured by, besides its own attributes.
-export const GROUPINGS = {
-  community: { label: "Community (Louvain)" },
-  component: { label: "Connected component" },
-  strong_component: { label: "Strongly connected component", directed: true },
-};
+export const { METRICS, GROUPINGS } = G;
 const HEAVY_NODES = 5000;
 
 let libsPromise;
@@ -73,6 +56,11 @@ const STALE = Symbol("stale graph load");
 
 export function createGraphView(ui) {
   const { lake } = ui;
+  const runSql = async (sql) => {
+    const result = await lake.runSql(sql);
+    if (result.truncated) throw new Error("SQL returned an incomplete graph. Narrow the graph SQL.");
+    return result;
+  };
   let loadSeq = 0;
   const s = {
     def: null, // the graph definition being shown
@@ -131,7 +119,7 @@ export function createGraphView(ui) {
     try {
       const { Graph } = await loadLibs();
       live();
-      const head = await lake.runSql(G.columnsSql(norm));
+      const head = await runSql(G.columnsSql(norm));
       live();
       if (head.columns.length < 2) throw new Error("The edge query needs at least two columns: source and target.");
       s.columns = {
@@ -140,40 +128,41 @@ export function createGraphView(ui) {
         weighted: head.columns.some((c, i) => i > 1 && c.name.toLowerCase() === "weight"),
         numeric: /INT|LONG|SHORT|BYTE|DECIMAL|DOUBLE|FLOAT|REAL|NUMERIC/i.test(head.columns[0].type ?? ""),
       };
-      const total = Number((await lake.runSql(G.countEdgesSql(norm))).rows[0]?.[0] ?? 0);
+      const total = Number((await runSql(G.countEdgesSql(norm))).rows[0]?.[0] ?? 0);
       live();
       s.totalEdges = total;
-      s.graph = new Graph({ type: norm.directed ? "directed" : "undirected", allowSelfLoops: true });
+      s.graph = G.createGraph(Graph, norm.directed);
       if (s.totalEdges <= G.FULL_LOAD_EDGES) {
         s.mode = "full";
-        const edgeRows = await lake.runSql(G.loadEdgesSql(norm, G.FULL_LOAD_EDGES));
+        const edgeRows = await runSql(G.loadEdgesSql(norm, G.FULL_LOAD_EDGES));
         live();
         addEdges(G.edgeRecords(edgeRows));
         if (norm.nodes_sql) {
           // Nodes without edges are part of the graph too, unless there are too many to draw.
-          const nodeCount = Number((await lake.runSql(G.countNodesSql(norm))).rows[0]?.[0] ?? 0);
+          const nodeCount = Number((await runSql(G.countNodesSql(norm))).rows[0]?.[0] ?? 0);
           live();
           if (nodeCount <= G.FULL_LOAD_NODES) {
-            addNodes(G.nodeRecords(await lake.runSql(G.nodesSql(norm))), { onlyExisting: false });
+            addNodes(G.nodeRecords(await runSql(G.nodesSql(norm))), { onlyExisting: false });
           } else {
-            const head = await lake.runSql(`${G.nodesSql(norm)} LIMIT 0`);
+            const head = await runSql(`${G.nodesSql(norm)} LIMIT 0`);
             live();
-            addNodes(G.nodeRecords(await lake.runSql(G.nodesInEdgesSql(norm, s.columns, head.columns[0].name))));
+            addNodes(G.nodeRecords(await runSql(G.nodesInEdgesSql(norm, s.columns, head.columns[0].name))));
           }
           live();
         }
       } else {
         s.mode = "overview";
         // The best-connected nodes with their neighbours, then every edge among those nodes.
-        const top = (await lake.runSql(G.topNodesSql(norm, s.columns))).rows.map((r) => r[0]);
+        const top = (await runSql(G.topNodesSql(norm, s.columns))).rows.map((r) => r[0]);
         live();
         for (const id of top) ensureNode(id);
-        const touching = await lake.runSql(G.edgesTouchingSql(norm, s.columns, top));
+        const touching = await runSql(G.edgesTouchingSql(norm, s.columns, top));
         live();
         addEdges(G.edgeRecords(touching));
         const loaded = s.graph.nodes().map((n) => s.graph.getNodeAttribute(n, "raw"));
-        const among = await lake.runSql(`${G.edgesAmongSql(norm, s.columns, loaded)} LIMIT ${G.FULL_LOAD_EDGES}`);
+        const among = await runSql(G.edgesAmongSql(norm, s.columns, loaded, G.FULL_LOAD_EDGES));
         live();
+        s.graph.clearEdges();
         addEdges(G.edgeRecords(among));
         await loadNodeAttributes(loaded);
         live();
@@ -191,42 +180,15 @@ export function createGraphView(ui) {
     }
   }
 
-  function ensureNode(raw) {
-    const key = G.keyOf(raw);
-    if (!s.graph.hasNode(key)) s.graph.addNode(key, { raw, label: key, attributes: {}, x: Math.random(), y: Math.random(), size: 4 });
-    return key;
-  }
-
-  function addEdges(records) {
-    for (const r of records) {
-      const a = ensureNode(r.source);
-      const b = ensureNode(r.target);
-      const existing = s.graph.edge(a, b);
-      // Repeated pairs merge into one edge; with a weight column their weights add up.
-      if (!existing) s.graph.addEdge(a, b, { weight: r.weight, count: 1, attributes: r.attributes });
-      else {
-        s.graph.updateEdgeAttribute(existing, "count", (c) => (c ?? 1) + 1);
-        if (s.columns.weighted) s.graph.updateEdgeAttribute(existing, "weight", (w) => (w ?? 0) + r.weight);
-      }
-    }
-  }
-
-  function addNodes(records, { onlyExisting = true } = {}) {
-    for (const r of records) {
-      const key = G.keyOf(r.id);
-      if (!s.graph.hasNode(key)) {
-        if (onlyExisting) continue;
-        ensureNode(r.id);
-      }
-      s.graph.mergeNodeAttributes(key, { label: r.label, attributes: r.attributes });
-    }
-  }
+  const ensureNode = (raw) => G.ensureNode(s.graph, raw);
+  const addEdges = (records) => G.addEdges(s.graph, records, s.columns.weighted);
+  const addNodes = (records, { onlyExisting = true } = {}) => G.addNodes(s.graph, records, onlyExisting);
 
   async function loadNodeAttributes(ids) {
     const graph = s.graph;
     if (!s.def.nodes_sql || !ids.length) return;
-    const head = await lake.runSql(`${G.nodesSql(s.def)} LIMIT 0`);
-    const rows = await lake.runSql(G.nodesSql(s.def, { column: head.columns[0].name, values: ids }));
+    const head = await runSql(`${G.nodesSql(s.def)} LIMIT 0`);
+    const rows = await runSql(G.nodesSql(s.def, { column: head.columns[0].name, values: ids }));
     if (s.graph === graph) addNodes(G.nodeRecords(rows));
   }
 
@@ -236,7 +198,7 @@ export function createGraphView(ui) {
     const before = s.graph.order;
     const { x, y } = s.graph.getNodeAttributes(key);
     const graph = s.graph;
-    const records = G.edgeRecords(await lake.runSql(G.neighborsSql(s.def, s.columns, s.graph.getNodeAttribute(key, "raw"))));
+    const records = G.edgeRecords(await runSql(G.neighborsSql(s.def, s.columns, s.graph.getNodeAttribute(key, "raw"))));
     if (s.graph !== graph) return 0; // another graph was opened meanwhile
     addEdges(records);
     const added = s.graph.nodes().slice(before);
@@ -268,95 +230,18 @@ export function createGraphView(ui) {
   async function metric(name) {
     if (s.metrics[name]) return s.metrics[name];
     const { lib } = await loadLibs();
-    const g = s.graph;
-    const c = lib.metrics.centrality;
-    const weight = weighted() ? "weight" : null;
-    let out;
-    switch (name) {
-      case "degree": out = Object.fromEntries(g.nodes().map((n) => [n, g.degree(n)])); break;
-      case "in_degree": out = Object.fromEntries(g.nodes().map((n) => [n, g.inDegree(n)])); break;
-      case "out_degree": out = Object.fromEntries(g.nodes().map((n) => [n, g.outDegree(n)])); break;
-      case "pagerank": out = c.pagerank(g, { getEdgeWeight: weight }); break;
-      case "betweenness": out = c.betweenness(g, { getEdgeWeight: weight, normalized: true }); break;
-      case "closeness": out = c.closeness(g); break;
-      case "eigenvector":
-        try {
-          out = c.eigenvector(g, { getEdgeWeight: weight, maxIterations: 500 });
-        } catch (err) {
-          throw new Error(`Eigenvector centrality did not converge on this graph (${err.message}).`);
-        }
-        break;
-      case "hub":
-      case "authority": {
-        const { hubs, authorities } = c.hits(g, { getEdgeWeight: weight, maxIterations: 500 });
-        s.metrics.hub = hubs;
-        s.metrics.authority = authorities;
-        return s.metrics[name];
-      }
-      case "clustering": out = G.clusteringCoefficients(g.nodes(), (n) => g.neighbors(n)); break;
-      default: throw new Error(`Unknown metric ${name}. Use one of: ${Object.keys(METRICS).join(", ")}.`);
-    }
-    s.metrics[name] = out;
-    return out;
+    return s.metrics[name] = G.metric(s.graph, lib, name, weighted());
   }
 
   async function grouping(name) {
     if (s.groups[name]) return s.groups[name];
     const { lib } = await loadLibs();
-    const g = s.graph;
-    let byNode = {};
-    let meta = {};
-    if (name === "community") {
-      const res = lib.communitiesLouvain.detailed(g, { getEdgeWeight: weighted() ? "weight" : null, rng: seeded(42) });
-      byNode = numberBySize(res.communities, "Community");
-      meta = { count: res.count, modularity: res.modularity };
-    } else if (name === "component" || name === "strong_component") {
-      const comps = name === "component" ? lib.components.connectedComponents(g) : lib.components.stronglyConnectedComponents(g);
-      comps.sort((a, b) => b.length - a.length);
-      const prefix = name === "component" ? "Component" : "Strong component";
-      comps.forEach((nodes, i) => nodes.forEach((n) => (byNode[n] = `${prefix} ${i + 1}`)));
-      meta = { count: comps.length, largest: comps[0]?.length ?? 0 };
-    } else if (name.startsWith("attr:")) {
-      const attr = name.slice(5);
-      g.forEachNode((n, a) => (byNode[n] = a.attributes?.[attr] ?? null));
-    } else {
-      throw new Error(`Unknown grouping ${name}. Use one of: ${Object.keys(GROUPINGS).join(", ")}, or attr:<column>.`);
-    }
-    s.groups[name] = { byNode, meta };
-    return s.groups[name];
-  }
-
-  // Louvain's ids are arbitrary; name groups by size instead, largest first.
-  function numberBySize(ids, prefix) {
-    const counts = new Map();
-    for (const id of Object.values(ids)) counts.set(id, (counts.get(id) ?? 0) + 1);
-    const rank = new Map([...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([id], i) => [id, `${prefix} ${i + 1}`]));
-    return Object.fromEntries(Object.entries(ids).map(([n, id]) => [n, rank.get(id)]));
-  }
-
-  // Louvain is randomised; a fixed seed keeps colours the same between visits.
-  function seeded(seed) {
-    let x = seed;
-    return () => ((x = (x * 1664525 + 1013904223) % 4294967296) / 4294967296);
+    return s.groups[name] = G.grouping(s.graph, lib, name, weighted());
   }
 
   async function stats() {
-    const g = s.graph;
     const { lib } = await loadLibs();
-    const comp = await grouping("component");
-    const out = {
-      nodes: g.order,
-      edges: g.size,
-      directed: g.type === "directed",
-      weighted: weighted(),
-      density: lib.metrics.graph.density(g),
-      // Matches the Degree metric, which counts in- and out-edges.
-      average_degree: g.order ? (2 * g.size) / g.order : 0,
-      components: comp.meta.count,
-      largest_component: comp.meta.largest,
-      mode: s.mode,
-      total_edges_in_lake: s.totalEdges,
-    };
+    const out = { ...G.stats(s.graph, lib, weighted()), mode: s.mode, total_edges_in_lake: s.totalEdges };
     if (s.groups.community) Object.assign(out, { communities: s.groups.community.meta.count, modularity: s.groups.community.meta.modularity });
     if (s.groups.strong_component) out.strong_components = s.groups.strong_component.meta.count;
     if (s.metrics.clustering) out.average_clustering = avg(Object.values(s.metrics.clustering));
@@ -375,20 +260,20 @@ export function createGraphView(ui) {
     const stale = () => s.graph !== graph;
     const gone = () => new Error("Another graph was opened while the path search ran.");
     let keys;
-    if (s.graph.hasNode(from) && s.graph.hasNode(to)) {
+    if (s.mode === "full" && s.graph.hasNode(from) && s.graph.hasNode(to)) {
       const { lib } = await loadLibs();
       const w = useWeights && weighted();
-      keys = w ? lib.shortestPath.dijkstra.bidirectional(s.graph, from, to, "weight") : lib.shortestPath.bidirectional(s.graph, from, to);
+      keys = G.shortestPath(s.graph, lib, from, to, w)?.nodes.map((n) => G.keyOf(n.node));
     }
     if (!keys && s.mode === "overview") {
       // Not connected among the loaded nodes: search the whole graph in SQL.
-      const raw = await G.sqlShortestPath({ runSql: lake.runSql, def: s.def, columns: s.columns, from: rawId(from), to: rawId(to), directed: s.def.directed });
+      const raw = await G.sqlShortestPath({ runSql, def: s.def, columns: s.columns, from: rawId(from), to: rawId(to), directed: s.def.directed });
       if (stale()) throw gone();
       if (raw) {
         const before = s.graph.order;
         for (let i = 0; i + 1 < raw.length; i++) {
           const [a, b] = [raw[i], raw[i + 1]];
-          const fwd = await lake.runSql(G.edgeBetweenSql(s.def, s.columns, a, b, s.def.directed));
+          const fwd = await runSql(G.edgeBetweenSql(s.def, s.columns, a, b, s.def.directed));
           if (stale()) throw gone();
           addEdges(G.edgeRecords(fwd));
         }
@@ -1060,26 +945,15 @@ export function createGraphView(ui) {
   // Ranked nodes for a metric or grouping, for agents and the table.
   async function ranking(name, top = 10) {
     if (!s.graph) throw new Error("No graph is open. Use open_graph first.");
-    if (Object.hasOwn(METRICS, name)) {
-      const vals = await metric(name);
-      return Object.entries(vals).sort((a, b) => b[1] - a[1]).slice(0, top).map(([n, v]) => ({ node: s.graph.getNodeAttribute(n, "raw"), label: label(n), value: v }));
-    }
-    if (!Object.hasOwn(GROUPINGS, name) && !name.startsWith("attr:")) {
-      throw new Error(`Unknown metric ${name}. Use one of: ${[...Object.keys(METRICS), ...Object.keys(GROUPINGS)].join(", ")}.`);
-    }
-    const grp = await grouping(name);
-    const cat = G.categorize(grp.byNode, top);
-    return { ...grp.meta, groups: cat.legend.map((x) => ({ group: x.category, nodes: x.count })), other: cat.other };
+    const { lib } = await loadLibs();
+    const computed = Object.hasOwn(METRICS, name) ? await metric(name) : await grouping(name);
+    return G.ranking(s.graph, lib, name, weighted(), top, computed);
   }
 
   function neighbors(id) {
     const key = findNode(G.keyOf(id));
     if (!key) throw new Error(`No node ${id} in the loaded graph.`);
-    const g = s.graph;
-    const pick = (ns) => ns.slice(0, 200).map((n) => ({ node: g.getNodeAttribute(n, "raw"), label: label(n) }));
-    return g.type === "directed"
-      ? { node: g.getNodeAttribute(key, "raw"), label: label(key), out: pick(g.outNeighbors(key)), in: pick(g.inNeighbors(key)), out_degree: g.outDegree(key), in_degree: g.inDegree(key) }
-      : { node: g.getNodeAttribute(key, "raw"), label: label(key), neighbors: pick(g.neighbors(key)), degree: g.degree(key) };
+    return G.neighbors(s.graph, key);
   }
 
   // Keep canvas colours in step with the theme, whether the OS or the page changes it.
