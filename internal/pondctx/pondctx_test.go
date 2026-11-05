@@ -39,6 +39,12 @@ func fakeDocker(args []string) int {
 		fmt.Println(os.Getenv("FAKE_ATTACHED"))
 	case args[0] == "image" && args[1] == "ls":
 		fmt.Println("sha256:abc")
+	case args[0] == "exec" && os.Getenv("FAKE_EXITED") != "":
+		return 1
+	case args[0] == "inspect" && os.Getenv("FAKE_EXITED") != "":
+		fmt.Println("false")
+	case args[0] == "logs" && os.Getenv("FAKE_EXITED") != "":
+		fmt.Println("boom: bad config")
 	case args[0] == "exec":
 		// `cat /data/.pond-mount`: read the marker through the host directory, like a real bind mount.
 		if mount := os.Getenv("FAKE_MOUNT"); mount != "" {
@@ -209,6 +215,16 @@ func TestStartRefusesPathsDockerCannotSee(t *testing.T) {
 	// No FAKE_MOUNT: the container sees an empty directory, as with an unshared path.
 	_, err := Start(context.Background(), f.ctx, "img:1", func(string) {})
 	if err == nil || !strings.Contains(err.Error(), "Docker cannot see") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestStartReportsAContainerThatExited(t *testing.T) {
+	f := setup(t)
+	t.Setenv("FAKE_PORT", "1")
+	t.Setenv("FAKE_EXITED", "1")
+	_, err := Start(context.Background(), f.ctx, "img:1", func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "exited during startup") || !strings.Contains(err.Error(), "boom: bad config") {
 		t.Errorf("err = %v", err)
 	}
 }

@@ -418,13 +418,20 @@ func up(a *args) error {
 
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
+	// Stop seeding when up returns for any reason, before the deferred cleanup stops MiniLake.
+	seedCtx, stopSeeding := context.WithCancel(sig)
+	defer stopSeeding()
 	if c != nil && fresh {
 		go func() {
-			if err := seed.Run(sig, client, c.Dir, logf); err != nil && sig.Err() == nil {
+			if err := seedLake(seedCtx, client, *c); err != nil && seedCtx.Err() == nil {
 				logf("! %v", err)
-				logf("  Fix the script, then run `pond seed` (or `pond reset` to start over).")
+				logf("  Fix the script, then run `pond reset` to start over from an empty lake,")
+				logf("  or `pond seed` to run every script again if they can safely run twice.")
 			}
 		}()
+	} else if c != nil && exists(c.SeedMarker()) {
+		logf("! Seeding didn't finish last time, so this lake may be half seeded. Run `pond reset`")
+		logf("  to start over, or `pond seed` if the scripts can safely run twice.")
 	}
 	select {
 	case <-sig.Done():
@@ -543,7 +550,28 @@ func seedContext(a *args) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), stopSignals...)
 	defer stop()
-	return seed.Run(ctx, client, c.Dir, logf)
+	return seedLake(ctx, client, c)
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// seedLake runs the context's seeds, leaving a marker until they all succeed.
+func seedLake(ctx context.Context, client *lake.Client, c pondctx.Context) error {
+	files, err := seed.Files(c.Dir)
+	if err != nil || len(files) == 0 {
+		return err
+	}
+	if err := os.WriteFile(c.SeedMarker(), nil, 0o644); err != nil {
+		return err
+	}
+	if err := seed.Run(ctx, client, c.Dir, logf); err != nil {
+		return err
+	}
+	os.Remove(c.SeedMarker())
+	return nil
 }
 
 // confirm asks the user to type want. It refuses without a terminal to ask on.
@@ -598,7 +626,7 @@ func reset(a *args) error {
 		return err
 	}
 	logf("Reset the lake of %s.", c.Name())
-	return seed.Run(ctx, client, c.Dir, logf)
+	return seedLake(ctx, client, c)
 }
 
 // lockStopped takes the context's lock for an offline operation on its data, so a

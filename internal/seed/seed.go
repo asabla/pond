@@ -9,12 +9,14 @@ package seed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/asabla/pond/internal/lake"
 )
@@ -106,8 +108,17 @@ func runSQL(ctx context.Context, l Lake, src string) error {
 	return nil
 }
 
+// PythonTimeout bounds one Python seed, so a Spark run that never ends can't hang
+// seeding forever.
+var PythonTimeout = time.Hour
+
 func runPython(ctx context.Context, l Lake, name, src string) error {
+	ctx, cancel := context.WithTimeout(ctx, PythonTimeout)
+	defer cancel()
 	res, err := l.RunPython(ctx, "seed: "+name, WorkspaceDir+"/"+name, src)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("did not finish within %s", PythonTimeout)
+	}
 	if err != nil {
 		return err
 	}
@@ -154,7 +165,7 @@ func SplitSQL(src string) []string {
 		case strings.HasPrefix(src[i:], "--"):
 			i = skipTo(src, i, "\n")
 		case strings.HasPrefix(src[i:], "/*"):
-			i = skipTo(src, i+2, "*/") + 1
+			i = skipBlockComment(src, i)
 		case src[i] == '$':
 			if tag := dollarTag(src[i:]); tag != "" {
 				i = skipTo(src, i+len(tag), tag) + len(tag) - 1
@@ -194,6 +205,50 @@ var dollarTagRE = regexp.MustCompile(`^\$[A-Za-z_]*\$`)
 
 func dollarTag(s string) string { return dollarTagRE.FindString(s) }
 
-var commentRE = regexp.MustCompile(`(?s)--[^\n]*|/\*.*?\*/`)
+// skipBlockComment returns the index of the "/" closing the comment that starts at i.
+// Block comments nest, as in DuckDB.
+func skipBlockComment(s string, i int) int {
+	depth := 0
+	for i < len(s) {
+		switch {
+		case strings.HasPrefix(s[i:], "/*"):
+			depth++
+			i += 2
+		case strings.HasPrefix(s[i:], "*/"):
+			depth--
+			i += 2
+			if depth == 0 {
+				return i - 1
+			}
+		default:
+			i++
+		}
+	}
+	return len(s)
+}
 
-func stripComments(s string) string { return strings.TrimSpace(commentRE.ReplaceAllString(s, "")) }
+// stripComments removes comments outside quotes, so "a--b" stays a name.
+func stripComments(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\'' || s[i] == '"' || s[i] == '`':
+			j := skipQuoted(s, i, s[i])
+			b.WriteString(s[i:min(j+1, len(s))])
+			i = j
+		case strings.HasPrefix(s[i:], "--"):
+			i = skipTo(s, i, "\n") - 1 // keep the newline
+		case strings.HasPrefix(s[i:], "/*"):
+			i = skipBlockComment(s, i)
+			b.WriteByte(' ')
+		case s[i] == '$' && dollarTag(s[i:]) != "":
+			tag := dollarTag(s[i:])
+			j := skipTo(s, i+len(tag), tag) + len(tag) - 1
+			b.WriteString(s[i:min(j+1, len(s))])
+			i = j
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return strings.TrimSpace(b.String())
+}

@@ -109,6 +109,9 @@ func (c Context) Container() string { return "pond-" + c.ID() + "-minilake" }
 // RunFile describes the running pond (PID and URLs) while it holds the lock.
 func (c Context) RunFile() string { return filepath.Join(c.StateDir(), "run.json") }
 
+// SeedMarker exists while seeds run, so an interrupted or failed first seed is noticed.
+func (c Context) SeedMarker() string { return filepath.Join(c.StateDir(), "seeding") }
+
 // PortFile is kept between runs so the context's URLs, and MCP registrations using them, stay put.
 func (c Context) PortFile() string { return filepath.Join(c.StateDir(), "port") }
 
@@ -354,10 +357,15 @@ func checkMount(ctx context.Context, c Context) error {
 	if err := os.WriteFile(marker, []byte(c.ID()), 0o644); err != nil {
 		return err
 	}
-	seen, err := docker(ctx, false, "exec", c.Container(), "cat", DataDir+"/.pond-mount")
+	seen, err := docker(ctx, true, "exec", c.Container(), "cat", DataDir+"/.pond-mount")
 	os.Remove(marker)
 	if err != nil {
-		return err
+		// A container that crashed on start can't run cat either; say that, with its logs,
+		// rather than blaming the mount.
+		if exited := exitedError(ctx, c); exited != nil {
+			return exited
+		}
+		seen = "" // the marker isn't there: the container sees an empty folder
 	}
 	if seen != c.ID() {
 		return fmt.Errorf("Docker cannot see %s, so data would not land in %s.\n"+
@@ -365,6 +373,19 @@ func checkMount(ctx context.Context, c Context) error {
 			"directory by default), or run pond from a directory under it.", c.Dir, c.StateDir())
 	}
 	return nil
+}
+
+// exitedError reports, with its last log lines, a MiniLake container that stopped.
+func exitedError(ctx context.Context, c Context) error {
+	running, err := docker(ctx, false, "inspect", "-f", "{{.State.Running}}", c.Container())
+	if err != nil {
+		return err
+	}
+	if running == "true" {
+		return nil
+	}
+	logs, _ := docker(ctx, false, "logs", "--tail", "30", c.Container())
+	return fmt.Errorf("MiniLake container exited during startup:\n%s", logs)
 }
 
 func waitHealthy(ctx context.Context, c Context, url string, timeout time.Duration) error {
@@ -381,13 +402,8 @@ func waitHealthy(ctx context.Context, c Context, url string, timeout time.Durati
 				return nil
 			}
 		}
-		running, err := docker(ctx, false, "inspect", "-f", "{{.State.Running}}", c.Container())
-		if err != nil {
+		if err := exitedError(ctx, c); err != nil {
 			return err
-		}
-		if running != "true" {
-			logs, _ := docker(ctx, false, "logs", "--tail", "30", c.Container())
-			return fmt.Errorf("MiniLake container exited during startup:\n%s", logs)
 		}
 		select {
 		case <-ctx.Done():

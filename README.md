@@ -123,7 +123,7 @@ CREATE OR REPLACE TABLE shop.raw.customers AS
 - **SQL files** can hold several statements, separated by semicolons, in MiniLake's DuckDB dialect. Pond runs `CREATE CATALOG [IF NOT EXISTS] name` and `CREATE SCHEMA [IF NOT EXISTS] catalog.schema` through Unity Catalog itself: DuckDB has no `CREATE CATALOG`, and a schema made in SQL works but doesn't appear in the catalog tree. The Query tab does the same.
 - **Python files** run as one-off jobs, so they can use PySpark. They are saved in the workspace under `/Shared/pond/seed/`.
 
-Seeding stops at the first failure and prints the error, including the end of a failed Python run's output. Fix the script, then run `pond seed` to run all the scripts again, or `pond reset` to start from an empty lake. Scripts that use `IF NOT EXISTS` or `CREATE OR REPLACE` can safely run more than once.
+Seeding stops at the first failure and prints the error, including the end of a failed Python run's output. A Python script that runs for more than an hour is stopped. Fix the script, then run `pond reset` to start from an empty lake, or `pond seed` to run all the scripts again. Scripts that use `IF NOT EXISTS` or `CREATE OR REPLACE` can safely run more than once. If seeding didn't finish, the next `pond` start says so, because the lake may be half seeded.
 
 ### Example
 

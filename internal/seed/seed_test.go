@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asabla/pond/internal/lake"
 )
@@ -32,12 +33,33 @@ SELECT $$dollar; quoted$$, $tag$more;$tag$;
 	if got := SplitSQL("SELECT 1"); !slices.Equal(got, []string{"SELECT 1"}) {
 		t.Errorf("no semicolon: %q", got)
 	}
+	// Block comments nest, as in DuckDB: the inner */ doesn't end the outer comment.
+	nested := "/* outer /* inner; */ still; comment */ SELECT 1; SELECT 2"
+	if got := SplitSQL(nested); !slices.Equal(got, []string{"/* outer /* inner; */ still; comment */ SELECT 1", "SELECT 2"}) {
+		t.Errorf("nested: %q", got)
+	}
+}
+
+func TestCommentsInsideQuotesStay(t *testing.T) {
+	if got := stripComments(`-- note
+CREATE CATALOG "a--b" /* x */`); got != `CREATE CATALOG "a--b"` {
+		t.Errorf("got %q", got)
+	}
+	f := &fakeLake{}
+	dir := project(t, map[string]string{"01.sql": `CREATE CATALOG "a--b"; CREATE SCHEMA "a--b".s`})
+	if err := Run(context.Background(), f, dir, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"catalog: a--b", "schema: a--b.s"}; !slices.Equal(f.calls, want) {
+		t.Errorf("calls %q, want %q", f.calls, want)
+	}
 }
 
 type fakeLake struct {
 	calls  []string
 	failOn string
 	run    lake.RunResult
+	hang   bool
 }
 
 func (f *fakeLake) ExecSQL(_ context.Context, stmt string) error {
@@ -65,8 +87,12 @@ func (f *fakeLake) CreateSchema(_ context.Context, catalog, name string, ifNotEx
 	return nil
 }
 
-func (f *fakeLake) RunPython(_ context.Context, name, path, _ string) (*lake.RunResult, error) {
+func (f *fakeLake) RunPython(ctx context.Context, name, path, _ string) (*lake.RunResult, error) {
 	f.calls = append(f.calls, "python: "+name+" at "+path)
+	if f.hang {
+		<-ctx.Done() // a run that never terminates
+		return nil, ctx.Err()
+	}
 	r := f.run
 	return &r, nil
 }
@@ -128,6 +154,16 @@ func TestReportsFailedPythonRun(t *testing.T) {
 	f := &fakeLake{run: lake.RunResult{RunID: 7, State: "FAILED", Error: "exit 1", Logs: "Traceback...\n26/11/04 10:34:41 INFO ShutdownHookManager: Shutdown hook called\n"}}
 	err := Run(context.Background(), f, dir, func(string, ...any) {})
 	if err == nil || !strings.Contains(err.Error(), "run 7 ended failed: exit 1\nTraceback...") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestPythonSeedTimesOut(t *testing.T) {
+	defer func(d time.Duration) { PythonTimeout = d }(PythonTimeout)
+	PythonTimeout = 50 * time.Millisecond
+	dir := project(t, map[string]string{"load.py": "while True: pass"})
+	err := Run(context.Background(), &fakeLake{hang: true}, dir, func(string, ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "did not finish within 50ms") {
 		t.Errorf("err = %v", err)
 	}
 }
