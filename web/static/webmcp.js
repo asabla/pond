@@ -5,7 +5,10 @@
 
 import { FULL_LOAD_EDGES, listGraphs, saveGraph } from "./graph.js";
 import { METRICS, GROUPINGS } from "./views/graph.js";
-import { confirmDialog } from "./dom.js";
+import { formDialog } from "./dom.js";
+import { isDestructiveSql } from "./sql.js";
+
+export { isDestructiveSql };
 
 const DEFAULT_MAX_ROWS = 100;
 const READ_MAX_BYTES = 64 * 1024;
@@ -36,13 +39,22 @@ async function askUser(client, fn) {
   if (!ok) throw new Error("The user declined.");
 }
 
-// Asks the user before an agent replaces or deletes something.
-const confirmAgent = (client, title, body, confirm = "Allow") =>
-  askUser(client, () => confirmDialog({ title: `Agent wants to ${title}`, body, confirm }));
+// Set when the user lets agents delete and overwrite without asking, until the page reloads.
+// Dropping objects, deleting files and resetting the lake still ask every time.
+let trusted = false;
 
-// Statements that delete or overwrite data. Leading comments are skipped first.
-const DESTRUCTIVE_SQL = /^(drop|delete|truncate|alter|update|merge|insert\s+overwrite|create\s+or\s+replace)\b/i;
-export const isDestructiveSql = (sql) => DESTRUCTIVE_SQL.test(sql.replace(/^(\s*(--[^\n]*(\n|$)|\/\*[\s\S]*?\*\/))*\s*/, ""));
+// Asks the user before an agent replaces or deletes something.
+const confirmAgent = (client, title, body, confirm = "Allow") => trusted ? Promise.resolve() : askUser(client, async () => {
+  const v = await formDialog({
+    title: `Agent wants to ${title}`,
+    intro: body,
+    danger: true,
+    submit: confirm,
+    fields: [{ name: "trust", type: "checkbox", label: "Don't ask again until this page is reloaded" }],
+  });
+  if (v?.trust) trusted = true;
+  return v !== null;
+});
 
 function summarizeRun(run, output, lake) {
   return {
@@ -217,7 +229,7 @@ export function buildTools(ui) {
     /* ---------- Query ---------- */
     {
       name: "run_sql",
-      description: "Run SQL in the user's Query tab, where they see the statement and results, and return the result. MiniLake runs the DuckDB dialect, not Spark SQL. Statements can modify data.",
+      description: "Run SQL in the user's Query tab, where they see the statement and results, and return the result. MiniLake runs the DuckDB dialect, not Spark SQL. Statements can modify data; the user is asked first when one drops, deletes, truncates or replaces data.",
       inputSchema: obj({
         sql: str("A single SQL statement"),
         max_rows: { type: "integer", minimum: 0, maximum: 1000, default: DEFAULT_MAX_ROWS, description: "Rows to return to you. The user's grid shows up to 1000." },
@@ -227,7 +239,7 @@ export function buildTools(ui) {
         if (typeof sql !== "string" || !sql.trim()) throw new Error("sql must be a non-empty SQL statement.");
         // Check before touching the editor, so a refused call leaves the user's SQL alone.
         if (views.query.running()) throw new Error("Another query is still running in the editor.");
-        if (isDestructiveSql(sql)) await confirmAgent(client, "run a statement that changes or deletes data", sql, "Run");
+        if (isDestructiveSql(sql)) await confirmAgent(client, "run SQL that deletes or replaces data", sql, "Run");
         views.query.setSql(sql);
         ui.navigate("query");
         const out = await views.query.runEditor({ byAgent: true });
@@ -248,7 +260,10 @@ export function buildTools(ui) {
       name: "save_query",
       description: "Save SQL as a named query the user can reopen from the Query tab.",
       inputSchema: obj({ name: str("Query name"), sql: str("SQL") }, ["name", "sql"]),
-      execute: async ({ name, sql }) => {
+      execute: async ({ name, sql }, client) => {
+        if (typeof name !== "string" || !name.trim()) throw new Error("name must be a non-empty string.");
+        const existing = (await lake.listSavedQueries()).find((q) => q.display_name === name);
+        if (existing && existing.query_text !== sql) await confirmAgent(client, `replace the saved query “${name}”`, sql, "Replace");
         ui.navigate("query");
         const saved = await views.query.save({ name, sql, byAgent: true });
         return { id: saved.id, name };
@@ -297,7 +312,7 @@ export function buildTools(ui) {
     },
     {
       name: "run_script",
-      description: "Run a Python/PySpark script once in a Spark container on this context's network and show the run to the user. Use SparkSession.builder.getOrCreate(); MiniLake's tables are reachable by path or through its Unity Catalog connector. Saved under /Shared/pond.",
+      description: "Run a Python/PySpark script once in a Spark container on this context's network and show the run to the user. Use SparkSession.builder.getOrCreate(); MiniLake's tables are reachable by path or through its Unity Catalog connector. Saved under /Shared/pond/runs, apart from job scripts.",
       inputSchema: obj({ name: str("Run name"), source: str("Python source"), parameters: params, wait }, ["name", "source"]),
       execute: async ({ name, source, parameters, wait: w = true }) => {
         const { run_id } = await lake.runScript(name, source, parameters);
@@ -307,7 +322,7 @@ export function buildTools(ui) {
     },
     {
       name: "create_job",
-      description: "Save a Python/PySpark script as a job the user can run again.",
+      description: "Save a Python/PySpark script as a job the user can run again. The script gets its own file under /Shared/pond, never another job's.",
       inputSchema: obj({ name: str("Job name"), source: str("Python source"), parameters: params }, ["name", "source"]),
       execute: async ({ name, source, parameters }) => {
         const res = await lake.createScriptJob(name, source, parameters);
@@ -420,14 +435,17 @@ export function buildTools(ui) {
     },
     {
       name: "save_graph",
-      description: "Save a graph definition under a name so it can be reopened from the Graph tab. Replaces a saved graph with the same name.",
+      description: "Save a graph definition under a name so it can be reopened from the Graph tab. Replacing a saved graph with the same name asks the user first.",
       inputSchema: obj({
         name: str("Graph name: letters, digits, spaces, dots, dashes, underscores"),
         edges_sql: str("SQL whose first two columns are source and target node ids"),
         nodes_sql: str("Optional SQL whose first column is the node id"),
         directed: { type: "boolean", default: true },
       }, ["name", "edges_sql"]),
-      execute: async (def) => {
+      execute: async (def, client) => {
+        if ((await listGraphs(lake)).some((g) => g.name === def?.name?.trim())) {
+          await confirmAgent(client, `replace the saved graph “${def.name}”`, def.edges_sql, "Replace");
+        }
         const saved = await saveGraph(lake, def);
         await views.graph.refreshSaved();
         return saved;
@@ -502,7 +520,11 @@ export function buildTools(ui) {
       description: "Store a secret for jobs to use ({{secrets/scope/key}} or dbutils.secrets.get). Creates the scope if needed.",
       inputSchema: obj({ scope: str("Scope"), key: str("Key"), value: str("Secret value") }, ["scope", "key", "value"]),
       execute: async ({ scope, key, value }, client) => {
-        const keys = await lake.listSecrets(scope).catch(() => []);
+        // A scope that doesn't exist yet has no keys; any other failure must not skip the question.
+        const keys = await lake.listSecrets(scope).catch((err) => {
+          if (err.status === 404) return [];
+          throw err;
+        });
         if (keys.some((s) => s.key === key)) await confirmAgent(client, `replace the secret ${scope}/${key}`, "Jobs that use it get the new value.", "Replace");
         await ui.views.admin.saveSecret(scope, key, value);
         return `Stored ${scope}/${key}.`;

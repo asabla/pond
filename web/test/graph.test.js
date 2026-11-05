@@ -164,9 +164,11 @@ test("sqlShortestPath gives up on runaway frontiers", async () => {
 
 test("saved graphs round-trip through the lake's files", async () => {
   const files = new Map();
+  let down = false;
   const lake = {
     listDir: async (dir) => {
-      if (![...files.keys()].some((p) => p.startsWith(dir))) throw new Error("not found");
+      if (down) throw Object.assign(new Error("MiniLake is down"), { status: 502 });
+      if (![...files.keys()].some((p) => p.startsWith(dir))) throw Object.assign(new Error("not found"), { status: 404 });
       return [...files.keys()].map((path) => ({ path, is_directory: false }));
     },
     readFile: async (path) => new Blob([files.get(path)]),
@@ -192,6 +194,15 @@ test("saved graphs round-trip through the lake's files", async () => {
   await g.saveGraph(lake, { name: "b graph", edges_sql: "SELECT 7, 8" });
   assert.equal((await g.listGraphs(lake)).find((x) => x.name === "b graph").edges_sql, "SELECT 7, 8");
   assert.equal([...files.keys()].filter((p) => p.endsWith(".json") && !p.includes("junk")).length, 2);
+  // A failed listing isn't an empty folder: saving must not pick a file another graph uses.
+  down = true;
+  await assert.rejects(g.saveGraph(lake, { name: "c", edges_sql: "SELECT 1, 2" }), /MiniLake is down/);
+});
+
+test("graph definitions are single queries", () => {
+  assert.match(g.validateDefinition({ edges_sql: "SELECT 1 a, 2 b) AS e; DROP TABLE x; SELECT * FROM (SELECT 1 a, 2 b" }), /single query/);
+  assert.match(g.validateDefinition({ edges_sql: "SELECT 1, 2", nodes_sql: "SELECT 1; DELETE FROM t" }), /single query/);
+  assert.equal(g.validateDefinition({ edges_sql: "SELECT ';' AS a, 2 AS b;" }), null);
 });
 
 test("definitionFromTables doesn't exclude a column twice when it is both id and label", () => {

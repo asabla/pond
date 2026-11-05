@@ -13,9 +13,15 @@ export const IMPORT_VOLUME = "imports";
 let configPromise;
 
 export class LakeError extends Error {
-  constructor(message, code) {
+  /**
+   * @param {string} message
+   * @param {string} [code] MiniLake's error_code
+   * @param {number} [status] the HTTP status
+   */
+  constructor(message, code, status) {
     super(message);
     this.code = code;
+    this.status = status;
   }
 }
 
@@ -32,7 +38,7 @@ async function call(method, path, body) {
   } catch {
     data = { message: text };
   }
-  if (!res.ok) throw new LakeError(data.message || data.detail || `${method} ${path} failed (${res.status})`, data.error_code);
+  if (!res.ok) throw new LakeError(data.message || data.detail || `${method} ${path} failed (${res.status})`, data.error_code, res.status);
   return data;
 }
 
@@ -331,11 +337,23 @@ const pythonTask = (file, parameters) => ({
   spark_python_task: { python_file: file, parameters: parameters?.length ? parameters : undefined },
 });
 
-export const scriptPath = (name) => `${SCRIPTS_DIR}/${name.replace(/[^\w.-]+/g, "_").replace(/\.py$/, "")}.py`;
+export const scriptPath = (name, dir = SCRIPTS_DIR) => `${dir}/${name.replace(/[^\w.-]+/g, "_").replace(/\.py$/, "")}.py`;
+// One-off runs keep their scripts apart, so a run can't overwrite a job's script.
+export const RUNS_DIR = `${SCRIPTS_DIR}/runs`;
+
+// A script path no other script uses: names that differ only in punctuation share a
+// base, and an existing script may belong to another job.
+async function freeScriptPath(name) {
+  const base = scriptPath(name).slice(0, -3);
+  for (let i = 1; ; i++) {
+    const path = `${base}${i > 1 ? `-${i}` : ""}.py`;
+    if (!(await workspaceExists(path))) return path;
+  }
+}
 
 // Saves a script to the workspace and creates a job that runs it.
 export async function createScriptJob(name, source, parameters) {
-  const file = scriptPath(name);
+  const file = await freeScriptPath(name);
   await importWorkspace(file, source);
   const { job_id } = await call("POST", `${JOBS}/create`, { name, tasks: [pythonTask(file, parameters)] });
   return { job_id, file };
@@ -354,7 +372,7 @@ export const jobScript = (job) => job?.settings?.tasks?.[0]?.spark_python_task ?
 
 // One-off run: saves the script to the workspace and submits it without creating a job.
 export async function runScript(name, source, parameters) {
-  const file = scriptPath(name);
+  const file = scriptPath(name, RUNS_DIR);
   await importWorkspace(file, source);
   const { run_id } = await call("POST", `${JOBS}/runs/submit`, { run_name: name, tasks: [pythonTask(file, parameters)] });
   return { run_id, file };

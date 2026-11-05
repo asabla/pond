@@ -7,9 +7,14 @@
 // optionally a node query whose first column is the node id (a `label` column names nodes;
 // other columns become node attributes). Definitions are saved as JSON in the lake's files.
 
+import { isMultiStatement } from "./sql.js";
+
 export const GRAPHS_DIR = "/pond/graphs";
 // Up to this many edges the whole graph is loaded and every metric is exact.
 export const FULL_LOAD_EDGES = 30000;
+// A full graph also loads nodes without edges from the node query, up to this many.
+// Beyond that only nodes that have edges are loaded.
+export const FULL_LOAD_NODES = 50000;
 // Bigger graphs open on their best-connected nodes and those nodes' neighbours, up to
 // OVERVIEW_EDGES edges; double-click expands a node.
 export const OVERVIEW_SEEDS = 20;
@@ -28,6 +33,8 @@ export function validateDefinition(def) {
   if (def.name != null && typeof def.name !== "string") return "name must be a string.";
   if (def.nodes_sql != null && typeof def.nodes_sql !== "string") return "nodes_sql must be a string.";
   if (typeof def.edges_sql !== "string" || !def.edges_sql.trim()) return "edges_sql is required: a query whose first two columns are source and target.";
+  // Each query is wrapped as a subquery, so a second statement would run outside it.
+  if (isMultiStatement(def.edges_sql) || (def.nodes_sql && isMultiStatement(def.nodes_sql))) return "edges_sql and nodes_sql must each be a single query.";
   return null;
 }
 
@@ -74,6 +81,12 @@ export const columnsSql = (def) => `SELECT * FROM ${edges(def)} LIMIT 0`;
 export const loadEdgesSql = (def, limit) => `SELECT * FROM ${edges(def)} LIMIT ${limit}`;
 export const nodesSql = (def, ids) =>
   `SELECT * FROM ${wrap(def.nodes_sql)} AS n${ids ? ` WHERE n.${quoteIdent(ids.column)} IN (${list(ids.values)})` : ""}`;
+
+export const countNodesSql = (def) => `SELECT count(*) AS nodes FROM ${wrap(def.nodes_sql)} AS n`;
+// The node query's rows for nodes that appear in an edge, filtered in SQL.
+export const nodesInEdgesSql = (def, { source, target }, idColumn) =>
+  `SELECT * FROM ${wrap(def.nodes_sql)} AS n WHERE n.${quoteIdent(idColumn)} IN (` +
+  `SELECT ${quoteIdent(source)} FROM ${edges(def)} UNION SELECT ${quoteIdent(target)} FROM ${edges(def)})`;
 
 export function topNodesSql(def, { source, target }, n = OVERVIEW_SEEDS) {
   return `SELECT id, count(*) AS degree FROM (
@@ -273,18 +286,21 @@ async function graphFiles(lake) {
   let entries;
   try {
     entries = await lake.listDir(GRAPHS_DIR);
-  } catch {
-    return []; // the folder appears with the first saved graph
+  } catch (err) {
+    // The folder appears with the first saved graph. Any other failure must surface, or
+    // saveGraph would think no graphs exist and could overwrite one.
+    if (err?.status === 404) return [];
+    throw err;
   }
-  const files = [];
-  for (const e of entries.filter((x) => !x.is_directory && x.path.endsWith(".json"))) {
+  const read = async (e) => {
     try {
-      files.push({ path: e.path, def: normalize(JSON.parse(await (await lake.readFile(e.path)).text())) });
+      return { path: e.path, def: normalize(JSON.parse(await (await lake.readFile(e.path)).text())) };
     } catch {
-      // skip files that aren't graph definitions
+      return null; // skip files that aren't graph definitions
     }
-  }
-  return files.filter((f) => f.def.name);
+  };
+  const files = await Promise.all(entries.filter((x) => !x.is_directory && x.path.endsWith(".json")).map(read));
+  return files.filter((f) => f?.def.name);
 }
 
 export async function listGraphs(lake) {

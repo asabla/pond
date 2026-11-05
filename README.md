@@ -151,6 +151,8 @@ pond --host 0.0.0.0
 
 Pond prints a warning and the URLs others can use. Anyone who can reach the port can read and change the lake and run code in it, because MiniLake has no authentication. Pond accepts requests addressed to this machine's hostname and IP addresses, and refuses other names, which keeps DNS-rebinding attacks out.
 
+Whether shared or not, pond refuses requests to the lake that another web page sent, using the `Origin` and `Sec-Fetch-Site` headers browsers add. So a site you visit can't reach the lake through `localhost`. MCP clients, curl and scripts don't send these headers and work as before.
+
 ## UI
 
 | Section | What you can do |
@@ -221,7 +223,12 @@ The page registers its actions as tools on `navigator.modelContext` ([spec](http
 | Files | `list_files`, `read_file`, `write_file`, `delete_path`, `list_workspace`, `read_workspace_file`, `write_workspace_file` |
 | Admin | `list_warehouses`, `list_secrets`, `put_secret`, `reset_lake` |
 
-`drop_object`, `delete_path` and `reset_lake` open the same confirmation dialog a person gets, through `requestUserInteraction` when the browser provides it. Tools also ask before they overwrite or delete in other ways: `run_sql` with a statement such as `DROP`, `DELETE`, `UPDATE` or `CREATE OR REPLACE`, imports in `replace` mode, and `write_file`, `write_workspace_file` or `put_secret` on something that already exists. If the user cancels, the tool fails with "The user declined." Secret values are never returned or shown in the activity log.
+`drop_object`, `delete_path` and `reset_lake` open the same confirmation dialog a person gets, through `requestUserInteraction` when the browser provides it. Tools also ask before they delete or replace data in other ways:
+- `run_sql` with a statement that drops, deletes, truncates or replaces data, anywhere in the SQL;
+- imports in `replace` mode;
+- `write_file`, `write_workspace_file`, `save_query`, `save_graph` or `put_secret` on something that already exists.
+
+Queries, inserts, updates and schema changes that keep data run without asking, so an agent can analyse and reshape data freely. Python runs without asking too. One-off scripts (`run_script`) are saved under `/Shared/pond/runs`, and each new job gets its own script file, so an agent's script never replaces another one. The dialog has a "Don't ask again until this page is reloaded" box. Dropping objects, deleting files and resetting the lake ask every time regardless. If the user cancels, the tool fails with "The user declined." Secret values are never returned or shown in the activity log.
 
 In browsers without native WebMCP, load a WebMCP polyfill (for example MCP-B's `@mcp-b/global`) or call the same tools from `window.pond.tools`.
 

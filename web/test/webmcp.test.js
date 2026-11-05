@@ -65,11 +65,20 @@ test("destructive tools wait for requestUserInteraction when the agent offers it
   assert.equal(asked, 1);
 });
 
-test("isDestructiveSql spots statements that delete or overwrite, past leading comments", () => {
-  for (const sql of ["DROP TABLE a", "  delete from a", "-- tidy up\nTRUNCATE a", "/* x */ CREATE OR REPLACE TABLE a AS SELECT 1", "insert  overwrite a select 1", "UPDATE a SET b = 1"]) {
+test("isDestructiveSql spots statements that delete or replace data, wherever they hide", () => {
+  for (const sql of [
+    "DROP TABLE a", "  delete from a", "-- tidy up\nTRUNCATE a", "/* x */ CREATE OR REPLACE TABLE a AS SELECT 1",
+    "insert  overwrite a select 1", "INSERT OR REPLACE INTO a VALUES (1)", "SELECT 1; DROP TABLE t",
+    "WITH x AS (SELECT 1) DELETE FROM t", "CREATE /* c */ OR REPLACE TABLE a AS SELECT 1", "EXPLAIN ANALYZE DELETE FROM t",
+    "ALTER TABLE a DROP COLUMN b", "/* a /* nested */ comment */ DROP TABLE a",
+  ]) {
     assert.ok(isDestructiveSql(sql), sql);
   }
-  for (const sql of ["SELECT 1", "CREATE TABLE a (b INT)", "INSERT INTO a VALUES (1)", "-- drop table a\nSELECT 1"]) {
+  // Analysis and schema changes that keep data run without asking.
+  for (const sql of [
+    "SELECT 1", "CREATE TABLE a (b INT)", "INSERT INTO a VALUES (1)", "UPDATE a SET b = 1", "ALTER TABLE a ADD COLUMN c INT",
+    "-- drop table a\nSELECT 1", "SELECT 'drop table a; delete' AS note", 'SELECT "delete" FROM a', "SELECT deleted, dropped FROM a;",
+  ]) {
     assert.ok(!isDestructiveSql(sql), sql);
   }
 });
