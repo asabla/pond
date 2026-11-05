@@ -340,6 +340,7 @@ func up(a *args) error {
 			return err
 		}
 		described, dataRoot = c.Describe(), pondctx.DataDir
+		pondctx.Remember(*c)
 	} else {
 		url = strings.TrimRight(a.minilake, "/")
 	}
@@ -373,7 +374,7 @@ func up(a *args) error {
 	}
 	srv = &http.Server{Handler: server.New(server.Options{
 		Host: a.host, AllowedHosts: allowedHosts, Lake: client, Context: ctxInfo, DataRoot: dataRoot,
-		Static: static, Version: version,
+		Static: static, Version: version, Peers: peers(c),
 	}),
 		// Bounds only the request headers; bodies and MCP streams can take as long as they need.
 		ReadHeaderTimeout: 10 * time.Second,
@@ -447,6 +448,25 @@ func up(a *args) error {
 		return nil
 	case err := <-served:
 		return err
+	}
+}
+
+// peers lists the contexts this pond's UI can open next to its own: running ones and
+// recently served ones that are stopped.
+func peers(self *pondctx.Context) func() []server.Peer {
+	return func() []server.Peer {
+		var out []server.Peer
+		for _, k := range pondctx.CachedKnownContexts(2 * time.Second) {
+			isSelf := self != nil && k.ID == self.ID()
+			out = append(out, server.Peer{
+				ID: k.ID, Name: k.Name, Dir: k.Dir, Running: k.Running || isSelf, UI: k.UI, Status: k.Status, Self: isSelf,
+			})
+		}
+		// While starting, this context may not be listed yet; it always is to its own UI.
+		if self != nil && !slices.ContainsFunc(out, func(p server.Peer) bool { return p.Self }) {
+			out = append([]server.Peer{{ID: self.ID(), Name: self.Name(), Dir: self.Dir, Running: true, Self: true}}, out...)
+		}
+		return out
 	}
 }
 

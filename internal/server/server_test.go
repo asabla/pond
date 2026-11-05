@@ -371,3 +371,78 @@ func TestRefusesRequestsFromOtherSites(t *testing.T) {
 		}
 	}
 }
+
+// peered starts two ponds: "self" serves e, and "other" serves a second fake lake.
+func peered(t *testing.T) (*env, *env) {
+	t.Helper()
+	other := setup(t, nil, "")
+	self := setup(t, nil, "")
+	client, _ := lake.New(self.upstream.URL)
+	self.pond.Close()
+	self.pond = httptest.NewServer(New(Options{
+		Host: "127.0.0.1", Lake: client, Static: self.static(), Version: "test",
+		Peers: func() []Peer {
+			return []Peer{
+				{ID: "self-1", Name: "self", Running: true, Self: true},
+				{ID: "other-2", Name: "other", Running: true, UI: other.pond.URL},
+				{ID: "stopped-3", Name: "stopped", Dir: "/x/stopped"},
+			}
+		},
+	}))
+	t.Cleanup(self.pond.Close)
+	return self, other
+}
+
+func TestListsContexts(t *testing.T) {
+	self, _ := peered(t)
+	resp, body := self.request("GET", "/pond/contexts", nil, nil)
+	var out struct{ Contexts []Peer }
+	json.Unmarshal(body, &out)
+	if resp.StatusCode != http.StatusOK || len(out.Contexts) != 3 || !out.Contexts[0].Self {
+		t.Errorf("got %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := setup(t, nil, "").request("GET", "/pond/contexts", nil, nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("without peers: %d", resp.StatusCode)
+	}
+}
+
+func TestRoutesRequestsToOtherContexts(t *testing.T) {
+	self, other := peered(t)
+	origin := map[string]string{"Origin": self.pond.URL, "Sec-Fetch-Site": "same-origin"}
+
+	// Another context's lake, reached through its pond, without the browser's origin.
+	resp, body := self.request("POST", "/ctx/other-2/api/2.0/sql/statements", map[string]string{"statement": "SELECT 1"}, origin)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "SELECT 1") {
+		t.Fatalf("other: %d %s", resp.StatusCode, body)
+	}
+	other.fake.mu.Lock()
+	got := other.fake.seen[len(other.fake.seen)-1]
+	other.fake.mu.Unlock()
+	if got.path != "/api/2.0/sql/statements" || got.headers.Get("Origin") != "" || got.headers.Get("Sec-Fetch-Site") != "" {
+		t.Errorf("forwarded %s with %v", got.path, got.headers)
+	}
+	if resp, body := self.request("GET", "/ctx/other-2/pond/config", nil, origin); resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "warehouse_id") {
+		t.Errorf("other config: %d %s", resp.StatusCode, body)
+	}
+	// This context through the same scheme, handled locally.
+	if resp, _ := self.request("GET", "/ctx/self-1/_minilake/health", nil, origin); resp.StatusCode != http.StatusOK {
+		t.Errorf("self: %d", resp.StatusCode)
+	}
+
+	for name, tc := range map[string]struct {
+		path    string
+		headers map[string]string
+		want    int
+	}{
+		"stopped":         {"/ctx/stopped-3/_minilake/health", nil, http.StatusServiceUnavailable},
+		"unknown":         {"/ctx/nope/_minilake/health", nil, http.StatusNotFound},
+		"another's MCP":   {"/ctx/other-2/mcp", nil, http.StatusNotFound},
+		"another's files": {"/ctx/other-2/index.html", nil, http.StatusNotFound},
+		"other site":      {"/ctx/other-2/_minilake/health", map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
+		"other site list": {"/pond/contexts", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+	} {
+		if resp, body := self.request("GET", tc.path, nil, tc.headers); resp.StatusCode != tc.want {
+			t.Errorf("%s: got %d %s, want %d", name, resp.StatusCode, body, tc.want)
+		}
+	}
+}
