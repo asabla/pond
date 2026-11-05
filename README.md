@@ -208,14 +208,14 @@ Whether shared or not, pond refuses requests to the lake that another web page s
 
 The UI is a workbench:
 
-- **The navigator** on the left lists each context with its tables (catalog → schema → table), saved queries, graphs and jobs, plus its files, scripts and settings. Filter it from the box at the top.
-- **Tabs** hold what you open: a table, a query, a graph, a job run. Following a link inside a tab replaces what it shows, and ⌘-click (Ctrl-click) opens a new tab instead. Tabs, query drafts, and what is expanded in the navigator survive a reload. **Reopen closed tab** restores recently closed items and their query drafts (up to 20). Selecting query history opens another tab instead of replacing the current editor.
-- **⌘K** (Ctrl-K) searches tables, saved queries, graphs and jobs across every context, and runs commands such as **New query**, **Import a file** or switching the theme.
+- **Workspaces** are selected from the searchable dropdown next to **pond**. Search by name or directory. Pond shows one workspace at a time and restores its last selected tab when you return. Stopped workspaces can be removed from the list without deleting their data.
+- **The navigator** on the left lists the selected workspace's tables (catalog → schema → table), saved queries, graphs and jobs, plus its files, scripts and settings. Filter it from the box at the top. The header button hides or shows the navigator.
+- **Tabs** hold what you open: a table, a query, a graph, a job run. Following a link inside a tab replaces what it shows, and ⌘-click (Ctrl-click) opens a new tab instead. Tabs, query drafts, and what is expanded in the navigator survive workspace changes and reloads. ⌘⇧T (Ctrl-Shift-T) restores recently closed items and their query drafts in the selected workspace (up to 20). Selecting query history opens another tab instead of replacing the current editor.
 - **Activity**, on the right, lists what you and agents did in this page. It shows the target context and confirmation setting for browser agents. External MCP clients use their own approval controls. Page activity clears on reload; it is not a server audit log.
 
 | Tab | What you can do |
 | --- | --- |
-| **Overview** | A context at a glance: tables, recent queries, saved queries and graphs, recent runs, and how to connect an agent. Use Count rows when needed. Drop a file on it to import it. |
+| **Overview** | Tables, recent queries, saved queries and graphs, recent runs, and agent setup. Row counts load automatically in background batches and are cached for 30 seconds. SQL run through this page invalidates the cache. Query summaries expand to show their SQL. Drop a file on the page to import it. |
 | **Tables** | Browse catalogs → schemas → tables and volumes. Create and drop catalogs, schemas and volumes; drop tables. Import CSV, TSV, JSON, JSON Lines or Parquet into a table by dropping a file (create, replace or append). Table pages show a preview, the columns and storage details, and can copy the table to another context. |
 | **Query** | A SQL editor with highlighting (⌘↵ runs, ⌘S saves), result grid, CSV export and the lake's query history. Each query tab keeps its own draft and saved-query identity. Save as keeps another version; Export definition writes a `pond-seed/*.pond.json`-compatible definition. MiniLake runs the DuckDB dialect, not Spark SQL. |
 | **Graph** | Explore relationships in your tables as an interactive network. See [Graphs](#graphs). |
@@ -226,6 +226,8 @@ The UI is a workbench:
 Tab inserts one indent in SQL and Python editors. To leave an editor, press Escape then Tab, or use Shift+Tab. Graphs also have keyboard node search and text details; reduced-motion preferences stop automatic layout and camera animation.
 
 The theme follows your system; the button next to **Activity** switches between system, light and dark.
+
+Agent setup offers Codex, Claude Code, Cursor, VS Code / Copilot, and a generic MCP URL. The selected setup uses that workspace's server URL. Browser agent tools use the selected workspace and keep that target for the whole call, including any confirmation. External MCP clients remain connected to the server you registered.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/query-dark.png">
@@ -372,7 +374,7 @@ web/static/                  UI: plain HTML/CSS/JS modules, no build step
   lake.js                    MiniLake API client, shared by UI and WebMCP
   graph-core.js              graph definitions, SQL builders and analysis, shared with the server
   graph.js                   browser module exports and saved graph file access
-  workbench.js               shell: contexts, navigator, tabs, ⌘K palette, activity, routing
+  workbench.js               shell: workspace picker, navigator, tabs, activity, routing
   editor.js                  code editor with SQL and Python highlighting
   sql.js                     quote-aware SQL scanner: statements, destructive SQL
   views/                     home, data, query, graph, jobs, files, admin; one instance per tab

@@ -36,6 +36,7 @@ export class LakeError extends Error {
 export function createLake(base = "") {
   let configPromise;
   let dataRootPromise;
+  let dataVersion = 0;
 
 
   async function call(method, path, body) {
@@ -139,7 +140,7 @@ export function createLake(base = "") {
 
   async function runSql(statement) {
     const started = performance.now();
-    if (await catalogDdl(statement)) return { statementId: null, columns: [], rows: [], truncated: false, elapsedMs: Math.round(performance.now() - started) };
+    if (await catalogDdl(statement)) { dataVersion++; return { statementId: null, columns: [], rows: [], truncated: false, elapsedMs: Math.round(performance.now() - started) }; }
     const { warehouse_id, error } = await config();
     if (!warehouse_id) throw new LakeError(error || "No SQL warehouse available", "NO_WAREHOUSE");
 
@@ -173,6 +174,7 @@ export function createLake(base = "") {
     truncated ||= Boolean(chunk?.next_chunk_internal_link && chunk.next_chunk_index == null);
     truncated ||= res.manifest?.total_row_count != null && Number(res.manifest.total_row_count) !== rows.length;
     const columns = (res.manifest?.schema?.columns ?? []).map((c) => ({ name: c.name, type: c.type_text }));
+    if (!statement.trimStart().startsWith("/* pond:system */")) dataVersion++;
     return {
       statementId: res.statement_id,
       columns,
@@ -468,6 +470,7 @@ export function createLake(base = "") {
 
   return {
     base,
+    get dataVersion() { return dataVersion; },
     config,
     health: async () => {
       const response = await fetch(base + "/pond/health", { signal: AbortSignal.timeout(5000) });

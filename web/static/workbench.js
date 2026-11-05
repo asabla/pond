@@ -1,10 +1,9 @@
 // @ts-check
-// The workbench: every running context in one page. A navigator lists each context's
-// tables, queries, graphs, jobs and files; what you open becomes a tab; ⌘K finds
-// anything; the activity rail shows what you and agents did.
+// The workbench: choose one workspace, then navigate its tables, queries, graphs,
+// jobs and files. The activity rail shows what you and agents did.
 //
 // Views (views/*.js) are created once per tab, with a `ui` made for that tab, so a query
-// in one context and a table in another can sit side by side.
+// keeps its workspace while the workspace picker changes the visible tabs.
 import { createLake, LakeError } from "./lake.js";
 import { listGraphs } from "./graph.js";
 import { $, h, toast, store, snippet, reconcile, shellQuote, action } from "./dom.js";
@@ -73,6 +72,7 @@ const state = {
   /** @type {Tab[]} */ tabs: [],
   /** @type {Tab | null} */ active: null,
   filter: "",
+  lastTabs: /** @type {Record<string, string>} */ ({}),
   serverOffline: false,
   lastContact: null,
   activity: /** @type {{ at: Date, ctx: Ctx | null, actor: "you" | "agent", text: string, detail?: string, error?: boolean }[]} */ ([]),
@@ -85,6 +85,7 @@ const newNav = () => ({ open: new Set(), catalogs: null, schemas: {}, children: 
 
 const self = () => state.contexts.find((c) => c.self) ?? state.contexts[0];
 const byId = (id) => state.contexts.find((c) => c.id === id) ?? state.tabs.find((tab) => tab.ctx.id === id)?.ctx;
+const workspace = () => state.active?.ctx ?? self();
 
 // A context keeps its colour for good: the slot comes from its id, not its position.
 function slotOf(id) {
@@ -123,7 +124,10 @@ async function loadContexts() {
   }
   const next = listed.map((c) => {
     const known = byId(c.id);
-    if (known) return Object.assign(known, { running: c.running, status: c.status, ui: c.ui, name: c.name, dir: c.dir });
+    if (known) {
+      if (!known.running && c.running) known.config = null;
+      return Object.assign(known, { running: c.running, status: c.status, ui: c.ui, name: c.name, dir: c.dir });
+    }
     return newContext(c);
   });
   for (const tab of state.tabs) if (!next.some((ctx) => ctx.id === tab.ctx.id)) tab.ctx.running = false;
@@ -131,7 +135,9 @@ async function loadContexts() {
   renderConnection();
   renderNav();
   renderTabs();
-  for (const ctx of next) if (ctx.running) watch(ctx);
+  renderWorkspaces();
+  const selected = workspace();
+  if (selected?.running) watch(selected);
 }
 
 /** @param {Ctx} ctx */
@@ -168,7 +174,7 @@ async function watch(ctx) {
   if (watching.has(ctx.id)) return;
   watching.add(ctx.id);
   const tick = async () => {
-    if (!ctx.running || byId(ctx.id) !== ctx) { watching.delete(ctx.id); return; }
+    if (!ctx.running || byId(ctx.id) !== ctx || workspace()?.id !== ctx.id) { watching.delete(ctx.id); return; }
     try { await loadStatus(ctx); } finally { setTimeout(tick, RETRY_MS); }
   };
   await tick();
@@ -184,18 +190,22 @@ function updateAvailability(tab) {
 }
 
 function renderConnection() {
-  const ctx = state.active?.ctx ?? self();
+  const ctx = workspace();
   if (!ctx) return;
-  const contextText = `${ctx.name} · ${ctx.dir}`;
+  const contextText = ctx.dir;
   if ($("#active-context").textContent !== contextText) $("#active-context").textContent = contextText;
-  const agentText = `Browser agent target: ${self()?.name} · ${self()?.dir}`;
+  $("#active-context").title = ctx.dir;
+  if ($("#workspace-name").textContent !== ctx.name) $("#workspace-name").textContent = ctx.name;
+  $("#workspace-btn").setAttribute("aria-label", `Workspace: ${ctx.name}. Choose workspace`);
+  const agentText = `Browser agent target: ${ctx.name} · ${ctx.dir}`;
   if ($("#agent-context").textContent !== agentText) $("#agent-context").textContent = agentText;
   const message = state.serverOffline ? "Pond connection lost. Retrying; editor drafts are kept."
     : !ctx.running ? "Stopped. Start this context in a terminal."
-    : ctx.offline ? `MiniLake connection lost: ${ctx.offline.error.replace(/[. ]+$/, "")}. Retrying; editor drafts are kept.` : "Connected";
+    : ctx.offline ? `MiniLake connection lost: ${ctx.offline.error.replace(/[. ]+$/, "")}. Retrying; editor drafts are kept.` : "";
   for (const tab of state.tabs) if (tab.instance) updateAvailability(tab);
   const last = ctx.lastContact ?? state.lastContact;
   const status = $("#connection-status");
+  status.hidden = !message;
   const statusText = `${message}${(state.serverOffline || ctx.offline) && last ? ` Last contact: ${last.toLocaleTimeString()}.` : ""}`;
   if (status.textContent !== statusText) status.textContent = statusText;
 }
@@ -203,7 +213,7 @@ function renderConnection() {
 /* ---------- Navigator data ---------- */
 
 /** @param {Ctx} ctx */
-async function refreshNav(ctx) {
+async function refreshNav(ctx, { refreshViews = true } = {}) {
   const open = ctx.nav.open;
   ctx.nav = { ...newNav(), open };
   renderNav();
@@ -224,7 +234,7 @@ async function refreshNav(ctx) {
   }
   await Promise.all([...open].filter((k) => ["queries", "graphs", "jobs"].includes(k)).map((k) => loadGroup(ctx, k)));
   renderNav();
-  for (const t of state.tabs) if (t.ctx === ctx && t.view === "home" && t.instance && !t.el?.hidden) t.instance.show(t.parts);
+  if (refreshViews) for (const t of state.tabs) if (t.ctx === ctx && t.view === "home" && t.instance && !t.el?.hidden) t.instance.treeChanged();
 }
 
 /** @param {Ctx} ctx @param {string} catalog */
@@ -332,7 +342,7 @@ const IN_PLACE = new Set(["home", "data", "files", "jobs", "admin"]);
 function titleOf(tab) {
   const [a, b] = tab.parts;
   switch (tab.view) {
-    case "home": return tab.ctx.name;
+    case "home": return "Overview";
     case "data": return a === "volume" ? b?.split(".").pop() ?? "Volume" : a?.split(".").pop() ?? "Catalogs";
     case "query": return tab.title ?? (tab.agent ? "Agent queries" : "Query");
     case "graph": return a ?? tab.title ?? "Graph";
@@ -390,7 +400,12 @@ function ensureInstance(tab) {
 /** @param {Tab} tab @param {{ history?: boolean }} [opts] */
 function activateTab(tab, { history = true } = {}) {
   const prev = state.active;
+  if (prev?.ctx.id !== tab.ctx.id) {
+    state.filter = "";
+    /** @type {HTMLInputElement} */ ($("#filter")).value = "";
+  }
   state.active = tab;
+  state.lastTabs[tab.ctx.id] = tab.id;
   for (const t of state.tabs) {
     if (t.el) t.el.hidden = t !== tab;
     if (t.instance) t.instance.el.hidden = t !== tab;
@@ -404,6 +419,7 @@ function activateTab(tab, { history = true } = {}) {
   persist();
   closeDrawer();
   renderConnection();
+  if (tab.ctx.running) watch(tab.ctx);
 }
 
 /** @param {Tab} tab @param {string[]} parts @param {{ history?: boolean }} [opts] */
@@ -427,14 +443,14 @@ function closeTab(tab) {
     closed.unshift({ id: tab.id, ctx: tab.ctx.id, context: { name: tab.ctx.name, dir: tab.ctx.dir }, view: tab.view, parts: tab.parts, title: tab.title });
     for (const old of closed.splice(20)) store(`pond.draft.${old.id}`, null);
     store("pond.closedTabs", closed);
-    toast(`Closed ${titleOf(tab)}. Use Reopen closed tab to restore it.`);
   }
   state.tabs.splice(i, 1);
   if (state.active === tab) {
-    const next = state.tabs[i] ?? state.tabs[i - 1];
+    const contextTabs = state.tabs.filter((t) => t.ctx.id === tab.ctx.id);
+    const next = contextTabs.find((t) => state.tabs.indexOf(t) >= i) ?? contextTabs.at(-1);
     state.active = null;
     if (next) activateTab(next, { history: false });
-    else open(self(), "home");
+    else open(tab.ctx, "home");
   }
   renderTabs();
   persist();
@@ -442,8 +458,9 @@ function closeTab(tab) {
 
 function reopenClosedTab() {
   const closed = store("pond.closedTabs") ?? [];
-  const saved = closed.shift();
-  if (!saved) return;
+  const index = closed.findIndex((tab) => tab.ctx === workspace()?.id);
+  if (index < 0) return;
+  const [saved] = closed.splice(index, 1);
   const ctx = byId(saved.ctx) ?? (saved.context?.dir ? newContext({ ...saved.context, id: saved.ctx, running: false, self: false }) : null);
   if (!ctx) return toast("Start the original context to reopen this item.", "err");
   store("pond.closedTabs", closed);
@@ -456,6 +473,7 @@ function persist() {
   store(STATE_KEY, {
     tabs: state.tabs.filter((t) => !t.agent).map((t) => ({ id: t.id, ctx: t.ctx.id, context: { name: t.ctx.name, dir: t.ctx.dir }, view: t.view, parts: t.parts, title: t.title })),
     active: state.active?.id ?? null,
+    lastTabs: state.lastTabs,
     navOpen: Object.fromEntries(state.contexts.map((c) => [c.id, [...c.nav.open]])),
   });
 }
@@ -463,6 +481,7 @@ function persist() {
 function restore() {
   const saved = store(STATE_KEY);
   if (!saved?.tabs) return false;
+  state.lastTabs = saved.lastTabs ?? {};
   for (const t of saved.tabs) {
     // Forgetting removes discovery only. Open tabs and drafts can still be used
     // offline and restored without putting the context back in the navigator.
@@ -584,10 +603,9 @@ function humanViews(ctx) {
   };
 }
 
-// The ui WebMCP drives: this pond's own context. Agents' SQL runs in a tab of its own, so
+// WebMCP binds the selected workspace for each call. Agents' SQL runs in a tab of its own, so
 // it never replaces what the user is writing.
-function agentUi() {
-  const ctx = self();
+function agentUi(ctx = workspace()) {
   const instanceOf = (view) => {
     const tab = view === "query" ? agentQueryTab(ctx) : latest(ctx, view) ?? open(ctx, view, []);
     if (state.active !== tab) activateTab(tab, { history: false });
@@ -595,21 +613,21 @@ function agentUi() {
   };
   return {
     get lake() {
-      return self().lake;
+      return ctx.lake;
     },
     navigate: (view, ...parts) => {
       if (view === "query") return instanceOf("query");
-      const tab = latest(self(), view);
+      const tab = latest(ctx, view);
       if (tab && view !== "data" && view !== "files" && view !== "jobs") {
         if (state.active !== tab) activateTab(tab);
         if (parts.length) routeTab(tab, parts.map(String));
         return tab;
       }
-      return open(self(), view, parts.map(String));
+      return open(ctx, view, parts.map(String));
     },
-    refreshTree: () => refreshNav(self()),
-    logAgent: (tool, input, error) => logAgent(tool, input, error),
-    snapshot: () => snapshot(),
+    refreshTree: () => refreshNav(ctx),
+    logAgent: (tool, input, error) => logAgent(tool, input, error, ctx),
+    snapshot: () => snapshot(ctx),
     views: {
       get query() { return instanceOf("query"); },
       get graph() { return instanceOf("graph"); },
@@ -630,13 +648,13 @@ function agentQueryTab(ctx) {
   return tab;
 }
 
-function snapshot() {
+function snapshot(ctx = workspace()) {
   const tab = state.active;
   return {
-    context: { name: self()?.name, dir: self()?.dir },
+    context: { name: ctx?.name, dir: ctx?.dir },
     open_tab: tab && { context: tab.ctx.name, view: tab.view, route: tab.parts.join("/"), title: titleOf(tab) },
-    tabs: state.tabs.map((t) => ({ context: t.ctx.name, view: t.view, title: titleOf(t) })),
-    ...(tab?.ctx.self ? tab.instance?.snapshot?.() : {}),
+    tabs: state.tabs.filter((t) => t.ctx.id === ctx?.id).map((t) => ({ context: t.ctx.name, view: t.view, title: titleOf(t) })),
+    ...(tab?.ctx.id === ctx?.id ? tab.instance?.snapshot?.() : {}),
   };
 }
 
@@ -649,12 +667,12 @@ function logActivity(entry) {
   renderActivity();
 }
 
-function logAgent(tool, input, error) {
+function logAgent(tool, input, error, ctx = workspace()) {
   // Never echo secret values into the page.
   const shown = input && Object.fromEntries(Object.entries(input).map(([k, v]) => [k, k === "value" ? "••••" : v]));
   const args = shown && Object.keys(shown).length ? JSON.stringify(shown, null, 1) : undefined;
-  logActivity({ ctx: self(), actor: "agent", text: tool, detail: args && args.length > 600 ? `${args.slice(0, 600)}…` : args, error: Boolean(error) });
-  if (error) logActivity({ ctx: self(), actor: "agent", text: `${tool} failed`, detail: error, error: true });
+  logActivity({ ctx, actor: "agent", text: tool, detail: args && args.length > 600 ? `${args.slice(0, 600)}…` : args, error: Boolean(error) });
+  if (error) logActivity({ ctx, actor: "agent", text: `${tool} failed`, detail: error, error: true });
   toast(error ? `Agent: ${tool} failed` : `Agent used ${tool}`, "agent");
 }
 
@@ -814,34 +832,16 @@ function listGroup(ctx, { key, label, icon: ic, item, all, allCurrent, empty }) 
 
 /** @param {Ctx} ctx */
 function contextSection(ctx) {
-  const nav = ctx.nav;
-  const isOpen = Boolean(state.filter) || nav.open.has("ctx");
   const status = !ctx.running ? "stopped" : ctx.offline ? "offline" : "ok";
-  const statusText = { ok: "Running", offline: "Not responding", stopped: "Stopped" }[status];
-  const head = h("div", { class: "ctx-head", style: `--ctx: var(--series-${ctx.slot + 1})` },
-    h("button", { class: "ctx-toggle", "aria-expanded": String(isOpen), onclick: () => {
-      if (ctx.nav.open.has("ctx")) ctx.nav.open.delete("ctx");
-      else {
-        ctx.nav.open.add("ctx");
-        if (ctx.running && !ctx.nav.catalogs) refreshNav(ctx);
-      }
-      renderNav();
-      persist();
-    } },
-      h("span", { class: "ctx-swatch", "aria-hidden": "true" }),
-      h("span", { class: "ctx-name" }, ctx.name),
-      h("span", { class: `ctx-status ${status}`, title: ctx.offline?.error ?? ctx.status ?? statusText }, h("i"), statusText)),
-    h("span", { class: "ctx-dir", title: ctx.dir }, shortDir(ctx.dir)));
-  if (!isOpen) return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head);
   if (!ctx.running) {
     const remove = action("Remove from list", () => forgetContext(ctx), "ghost", false);
     remove.setAttribute("aria-label", `Remove ${ctx.name} (${ctx.dir}) from list`);
-    return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head,
+    return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` },
       h("div", { class: "ctx-stopped" }, h("p", {}, "Start it to open its lake here:"), snippet(`pond ${shellQuote(ctx.dir)}`),
         remove, h("p", { class: "help" }, "Removes the list entry. Lake data, open tabs and browser drafts are kept.")));
   }
   const graphsItem = (g) => ({ label: g.name, icon: "graph", onclick: navOpen(ctx, "graph", [g.name]), current: isCurrent(ctx, "graph", [g.name]) });
-  return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` }, head,
+  return h("section", { class: `ctx ${status}`, "data-key": ctx.id, "aria-label": `${ctx.name} · ${ctx.dir}` },
     h("ul", { class: "ctx-tree" },
       !state.filter && h("li", {}, row({ label: "Overview", icon: "home", onclick: navOpen(ctx, "home", []), current: isCurrent(ctx, "home", []) })),
       tablesGroup(ctx),
@@ -861,6 +861,49 @@ function contextSection(ctx) {
       ]));
 }
 
+function openWorkspaces() {
+  const dialog = /** @type {HTMLDialogElement} */ ($("#workspace-picker"));
+  /** @type {HTMLInputElement} */ ($("#workspace-search")).value = "";
+  renderWorkspaces();
+  if (!dialog.open) dialog.showModal();
+  $("#workspace-btn").setAttribute("aria-expanded", "true");
+  $("#workspace-search").focus();
+}
+
+function closeWorkspaces() {
+  /** @type {HTMLDialogElement} */ ($("#workspace-picker")).close();
+  $("#workspace-btn").setAttribute("aria-expanded", "false");
+  $("#workspace-btn").focus();
+}
+
+function selectWorkspace(ctx) {
+  closeWorkspaces();
+  const last = state.tabs.find((tab) => tab.ctx.id === ctx.id && tab.id === state.lastTabs[ctx.id]);
+  const next = last ?? state.tabs.find((tab) => tab.ctx.id === ctx.id && !tab.agent);
+  if (next) activateTab(next);
+  else open(ctx, "home");
+  if (ctx.running && !ctx.nav.catalogs) refreshNav(ctx, { refreshViews: false });
+}
+
+function renderWorkspaces() {
+  const search = /** @type {HTMLInputElement} */ ($("#workspace-search"));
+  const query = search.value.trim().toLowerCase();
+  const contexts = state.contexts.filter((ctx) => `${ctx.name} ${ctx.dir}`.toLowerCase().includes(query));
+  const rows = contexts.map((ctx) => {
+    const selected = workspace()?.id === ctx.id;
+    const status = !ctx.running ? "Stopped" : ctx.offline ? "Not responding" : "Running";
+    const choose = h("button", { class: "workspace-select", "data-workspace": ctx.id, "aria-current": selected ? "true" : null,
+      "aria-label": `${ctx.name} · ${ctx.dir} · ${status}${selected ? " · Current workspace" : ""}`, onclick: () => selectWorkspace(ctx) },
+      h("span", { class: "workspace-label" }, h("b", {}, ctx.name), h("span", { class: "muted" }, status)),
+      h("span", { class: "workspace-dir" }, ctx.dir));
+    const remove = !ctx.running && action("Remove from list", () => forgetContext(ctx), "ghost", false);
+    if (remove) remove.setAttribute("aria-label", `Remove ${ctx.name} (${ctx.dir}) from list`);
+    return h("li", { "data-key": ctx.id }, choose, remove);
+  });
+  stampFocus(rows, "workspaces");
+  reconcile($("#workspace-list"), rows.length ? rows : h("li", { class: "empty" }, "No matching workspaces."));
+}
+
 async function forgetContext(ctx) {
   const response = await fetch(`/pond/contexts/${encodeURIComponent(ctx.id)}`, { method: "DELETE", signal: AbortSignal.timeout(5000) });
   if (!response.ok) {
@@ -870,7 +913,10 @@ async function forgetContext(ctx) {
   }
   await loadContexts();
   persist();
-  $("#filter").focus({ preventScroll: true });
+  renderWorkspaces();
+  if (/** @type {HTMLDialogElement} */ ($("#workspace-picker")).open) $("#workspace-search").focus();
+  else if (!$("#nav").inert) $("#filter").focus({ preventScroll: true });
+  else $("#workspace-btn").focus();
   toast(`Removed ${ctx.name} from the list. Lake data and browser drafts are kept. Run pond in its folder to add it again.`);
 }
 
@@ -884,13 +930,6 @@ function openSavedQuery(ctx, sq, e) {
 
 // ~ for the home folder, and only the last folders of a long path: the end is what tells
 // contexts apart.
-function shortDir(dir) {
-  const home = state.contexts.find((c) => c.config?.home)?.config?.home;
-  const path = home && dir.startsWith(home) ? `~${dir.slice(home.length)}` : dir;
-  const segs = path.split("/");
-  return segs.length > 4 ? `${segs[0] || "/"}/…/${segs.slice(-2).join("/")}` : path;
-}
-
 function stampFocus(nodes, prefix) {
   nodes.forEach((node, i) => {
     if (!(node instanceof HTMLElement)) return;
@@ -903,7 +942,8 @@ function stampFocus(nodes, prefix) {
 function renderNav() {
   const root = $("#nav-contexts");
   if (!state.contexts.length) return root.replaceChildren(h("p", { class: "nav-note" }, h("span", { class: "loading" })));
-  const sections = state.contexts.filter((c) => !state.filter || c.running || `${c.name} ${c.dir}`.toLowerCase().includes(state.filter.toLowerCase())).map(contextSection);
+  const ctx = workspace();
+  const sections = ctx ? [contextSection(ctx)] : [];
   stampFocus(sections, "nav");
   reconcile(root, sections);
 }
@@ -912,8 +952,7 @@ function renderNav() {
 
 function renderTabs() {
   const strip = $("#tabs");
-  const tabs = state.tabs.filter((t) => !t.agent || state.active === t || t.instance);
-  const many = new Set(state.tabs.map((t) => t.ctx.id)).size > 1;
+  const tabs = state.tabs.filter((t) => t.ctx.id === workspace()?.id && (!t.agent || state.active === t || t.instance));
   const items = tabs.map((t) => {
     const selected = t === state.active;
     const label = titleOf(t);
@@ -925,13 +964,11 @@ function renderTabs() {
         onauxclick: (e) => e.button === 1 && closeTab(t),
         onkeydown: (e) => tabKeys(e, t),
       },
-      many && h("span", { class: "tab-context-name" }, `${t.ctx.name}: `),
       icon(t.agent ? "agent" : VIEW_ICONS[t.view]),
       h("span", { class: "tab-title" }, label)),
       h("button", { class: "tab-close", "aria-label": `Close ${label}`, title: "Close", onclick: () => closeTab(t) }));
   });
   items.push(h("button", { class: "tab-new", "aria-label": "New query", title: "New query", onclick: () => open(state.active?.ctx ?? self(), "query", [], { newTab: true }) }));
-  items.push(h("button", { class: "btn ghost", disabled: !(store("pond.closedTabs")?.length), onclick: reopenClosedTab }, "Reopen closed tab"));
   stampFocus(items, "tabs");
   reconcile(strip, items);
   strip.querySelector(".tab.selected")?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -941,7 +978,7 @@ const VIEW_ICONS = { home: "home", data: "table", query: "query", graph: "graph"
 
 /** @param {KeyboardEvent} e @param {Tab} t */
 function tabKeys(e, t) {
-  const tabs = state.tabs.filter((x) => !x.agent || x.instance);
+  const tabs = state.tabs.filter((x) => x.ctx.id === t.ctx.id && (!x.agent || x.instance));
   const i = tabs.indexOf(t);
   const go = (j) => {
     const next = tabs[(j + tabs.length) % tabs.length];
@@ -955,116 +992,6 @@ function tabKeys(e, t) {
   else if (e.key === "Delete" || e.key === "Backspace") closeTab(t);
   else return;
   e.preventDefault();
-}
-
-/* ---------- Command palette (⌘K) ---------- */
-
-/**
- * @typedef {{ label: string, hint?: string, ctx?: Ctx, icon: string, run: (e?: any) => void, group: string }} Command
- */
-
-/** @returns {Command[]} */
-function commands() {
-  const out = [];
-  const many = state.contexts.length > 1;
-  for (const ctx of state.contexts) {
-    if (!ctx.running) {
-      out.push({ group: "Contexts", icon: "home", label: ctx.name, hint: "Stopped. Start it with pond in its folder", ctx, run: () => { ctx.nav.open.add("ctx"); renderNav(); } });
-      continue;
-    }
-    const at = many ? ` in ${ctx.name}` : "";
-    out.push(
-      { group: "Actions", icon: "query", label: `New query${at}`, ctx, run: () => open(ctx, "query", [], { newTab: true }) },
-      { group: "Actions", icon: "graph", label: `New graph${at}`, ctx, run: () => ensureInstance(open(ctx, "graph", [], { newTab: true })).newGraph() },
-      { group: "Actions", icon: "import", label: `Import a file${at}`, ctx, run: () => ensureInstance(open(ctx, "data", [])).importDialog?.() },
-      { group: "Go to", icon: "home", label: `Overview of ${ctx.name}`, ctx, run: () => open(ctx, "home") },
-      { group: "Go to", icon: "files", label: `Files${at}`, ctx, run: () => open(ctx, "files", ["dbfs"]) },
-      { group: "Go to", icon: "workspace", label: `Scripts${at}`, ctx, run: () => open(ctx, "files", ["workspace"]) },
-      { group: "Go to", icon: "job", label: `Jobs and runs${at}`, ctx, run: () => open(ctx, "jobs") },
-      { group: "Go to", icon: "settings", label: `Settings${at}`, ctx, run: () => open(ctx, "admin") },
-    );
-    for (const c of ctx.nav.catalogs ?? []) {
-      for (const s of ctx.nav.schemas[c.name] ?? []) {
-        for (const t of ctx.nav.children[`${c.name}.${s.name}`]?.tables ?? []) {
-          out.push({ group: "Tables", icon: "table", label: t.full_name, ctx, run: (e) => open(ctx, "data", [t.full_name], { newTab: e?.metaKey || e?.ctrlKey }) });
-        }
-      }
-    }
-    for (const sq of ctx.nav.queries ?? []) out.push({ group: "Saved queries", icon: "query", label: sq.display_name, ctx, run: (e) => openSavedQuery(ctx, sq, e) });
-    for (const g of ctx.nav.graphs ?? []) out.push({ group: "Graphs", icon: "graph", label: g.name, ctx, run: () => open(ctx, "graph", [g.name]) });
-    for (const j of ctx.nav.jobs ?? []) out.push({ group: "Jobs", icon: "job", label: j.settings?.name ?? `Job ${j.job_id}`, ctx, run: () => open(ctx, "jobs", ["job", String(j.job_id)]) });
-  }
-  out.push(
-    { group: "Page", icon: "query", label: "Reopen closed tab", run: reopenClosedTab },
-    { group: "Page", icon: "theme", label: "Switch theme: system, light, dark", run: cycleTheme },
-    { group: "Page", icon: "activity", label: "Show or hide activity", run: toggleActivity },
-  );
-  return out;
-}
-
-// Ranks by where the query's words appear: whole-label prefixes first, then word starts.
-function score(label, q) {
-  const l = label.toLowerCase();
-  let total = 0;
-  for (const word of q.split(/\s+/).filter(Boolean)) {
-    const i = l.indexOf(word);
-    if (i < 0) return -1;
-    total += i === 0 ? 0 : /[\s._/-]/.test(l[i - 1]) ? 1 : 3;
-  }
-  return total;
-}
-
-let paletteSel = 0;
-/** @type {Command[]} */
-let paletteItems = [];
-
-function openPalette() {
-  const dlg = /** @type {HTMLDialogElement} */ ($("#palette"));
-  const input = /** @type {HTMLInputElement} */ ($("#palette-input"));
-  if (dlg.open) return input.select();
-  input.value = "";
-  renderPalette();
-  dlg.showModal();
-  input.focus();
-  // Tables, queries and graphs load in the background and join the list as they arrive.
-  Promise.all(state.contexts.filter((c) => c.running && !c.offline).map(loadEverything)).then(() => dlg.open && renderPalette());
-}
-
-function renderPalette() {
-  const q = /** @type {HTMLInputElement} */ ($("#palette-input")).value.trim().toLowerCase();
-  const all = commands();
-  paletteItems = q
-    ? all.map((c) => ({ c, s: score(`${c.label} ${c.ctx?.name ?? ""}`, q) })).filter((x) => x.s >= 0).sort((a, b) => a.s - b.s).slice(0, 60).map((x) => x.c)
-    : all.filter((c) => c.group === "Actions" || c.group === "Go to").filter((c) => !c.ctx || c.ctx === (state.active?.ctx ?? self()));
-  paletteSel = Math.min(paletteSel, Math.max(0, paletteItems.length - 1));
-  const list = $("#palette-list");
-  let group = "";
-  const many = state.contexts.length > 1;
-  list.replaceChildren(...paletteItems.flatMap((c, i) => {
-    const head = c.group !== group ? [h("li", { class: "palette-group", role: "presentation" }, (group = c.group))] : [];
-    return [...head, h("li", {
-      class: "palette-item", role: "option", id: `pal-${i}`, "aria-selected": String(i === paletteSel),
-      onmousemove: () => i !== paletteSel && selectPalette(i), onclick: (e) => runPalette(i, e),
-    }, icon(c.icon), h("span", { class: "palette-label" }, c.label),
-    many && c.ctx && h("span", { class: "ctx-mark", style: `--ctx: var(--series-${c.ctx.slot + 1})` }, c.ctx.name),
-    c.hint && h("span", { class: "palette-hint" }, c.hint))];
-  }));
-  if (!paletteItems.length) list.replaceChildren(h("li", { class: "palette-empty" }, `Nothing matches “${q}”.`));
-  $("#palette-input").setAttribute("aria-activedescendant", paletteItems.length ? `pal-${paletteSel}` : "");
-}
-
-function selectPalette(i) {
-  paletteSel = i;
-  for (const li of document.querySelectorAll(".palette-item")) li.setAttribute("aria-selected", String(li.id === `pal-${i}`));
-  document.getElementById(`pal-${i}`)?.scrollIntoView({ block: "nearest" });
-  $("#palette-input").setAttribute("aria-activedescendant", `pal-${i}`);
-}
-
-function runPalette(i, e) {
-  const item = paletteItems[i];
-  if (!item) return;
-  /** @type {HTMLDialogElement} */ ($("#palette")).close();
-  item.run(e);
 }
 
 /* ---------- Theme, drawer, activity ---------- */
@@ -1097,30 +1024,43 @@ function toggleActivity(force) {
 
 const narrow = matchMedia("(max-width: 760px)");
 function syncDrawer() {
-  const closed = narrow.matches && !document.body.classList.contains("nav-open");
+  const closed = narrow.matches ? !document.body.classList.contains("nav-open") : document.body.classList.contains("sidebar-collapsed");
   const nav = $("#nav");
   nav.inert = closed;
   $("#main").inert = narrow.matches && !closed;
   if (closed && nav.contains(document.activeElement)) $("#nav-btn").focus();
-  if (!narrow.matches && document.activeElement === $("#nav-btn")) $("#filter").focus();
   $("#nav").setAttribute("aria-hidden", String(closed));
+  $("#nav-btn").setAttribute("aria-expanded", String(!closed));
+  $("#nav-btn").setAttribute("aria-label", closed ? "Show sidebar" : "Hide sidebar");
 }
 narrow.addEventListener("change", () => { closeDrawer(); syncDrawer(); });
 function closeDrawer() {
   document.body.classList.remove("nav-open");
-  $("#nav-btn").setAttribute("aria-expanded", "false");
   syncDrawer();
 }
 
 /* ---------- Wiring ---------- */
 
 $("#nav-btn").addEventListener("click", () => {
-  const isOpen = document.body.classList.toggle("nav-open");
-  $("#nav-btn").setAttribute("aria-expanded", String(isOpen));
+  if (narrow.matches) document.body.classList.toggle("nav-open");
+  else store("pond.sidebarCollapsed", document.body.classList.toggle("sidebar-collapsed"));
   syncDrawer();
-  if (isOpen) $("#filter").focus();
+  if (!$("#nav").inert) $("#filter").focus();
 });
-$("#palette-btn").addEventListener("click", openPalette);
+$("#workspace-btn").addEventListener("click", openWorkspaces);
+$("#workspace-close").addEventListener("click", closeWorkspaces);
+$("#workspace-search").addEventListener("input", renderWorkspaces);
+$("#workspace-picker").addEventListener("cancel", (event) => { event.preventDefault(); closeWorkspaces(); });
+$("#workspace-picker").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeWorkspaces(); });
+$("#workspace-picker").addEventListener("keydown", (event) => {
+  if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+  const buttons = [...document.querySelectorAll(".workspace-select")];
+  if (!buttons.length) return;
+  event.preventDefault();
+  const index = buttons.indexOf(/** @type {Element} */ (document.activeElement));
+  const next = index < 0 ? 0 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+  /** @type {HTMLElement} */ (buttons[next]).focus();
+});
 $("#theme-btn").addEventListener("click", cycleTheme);
 $("#activity-btn").addEventListener("click", () => toggleActivity());
 $("#activity-close").addEventListener("click", () => toggleActivity(false));
@@ -1128,7 +1068,9 @@ $("#trust").addEventListener("change", (e) => agentTrust.set(!(/** @type {HTMLIn
 document.addEventListener("pond:trust", renderTrust);
 $("#refresh-nav").addEventListener("click", async () => {
   await loadContexts();
-  for (const ctx of state.contexts) if (ctx.running) await Promise.all([loadStatus(ctx), refreshNav(ctx)]);
+  const ctx = workspace();
+  if (ctx?.running) await Promise.all([loadStatus(ctx), refreshNav(ctx)]);
+  if (state.active?.view !== "home") state.active?.instance?.treeChanged?.();
 });
 
 let filterTimer;
@@ -1138,25 +1080,11 @@ $("#filter").addEventListener("input", (e) => {
     state.filter = /** @type {HTMLInputElement} */ (e.target).value.trim().toLowerCase();
     renderNav();
     if (state.filter) {
-      await Promise.all(state.contexts.filter((c) => c.running).map(loadEverything));
+      const ctx = workspace();
+      if (ctx?.running) await loadEverything(ctx);
       renderNav();
     }
   }, 120);
-});
-
-$("#palette-input").addEventListener("input", () => {
-  paletteSel = 0;
-  renderPalette();
-});
-$("#palette-input").addEventListener("keydown", (e) => {
-  if (e.key === "ArrowDown") selectPalette(Math.min(paletteItems.length - 1, paletteSel + 1));
-  else if (e.key === "ArrowUp") selectPalette(Math.max(0, paletteSel - 1));
-  else if (e.key === "Enter") runPalette(paletteSel, e);
-  else return;
-  e.preventDefault();
-});
-$("#palette").addEventListener("click", (e) => {
-  if (e.target === e.currentTarget) /** @type {HTMLDialogElement} */ (e.currentTarget).close();
 });
 
 // Links inside a tab (#/<view>/…) are relative to that tab's context.
@@ -1180,9 +1108,9 @@ $("#panels").addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && e.key.toLowerCase() === "k") {
+  if (mod && e.shiftKey && e.key.toLowerCase() === "t") {
     e.preventDefault();
-    openPalette();
+    reopenClosedTab();
   } else if (mod && e.altKey && e.key.toLowerCase() === "n") {
     e.preventDefault();
     open(state.active?.ctx ?? self(), "query", [], { newTab: true });
@@ -1197,6 +1125,7 @@ window.addEventListener("hashchange", followHash);
 
 /* ---------- Start ---------- */
 
+document.body.classList.toggle("sidebar-collapsed", Boolean(store("pond.sidebarCollapsed")));
 syncDrawer();
 applyTheme(store("pond.theme") ?? "system");
 if (store("pond.activity")) toggleActivity(true);
@@ -1206,6 +1135,7 @@ renderTrust();
 while (!state.contexts.length) {
   await loadContexts();
   if (!state.contexts.length) {
+    $("#connection-status").hidden = false;
     $("#connection-status").textContent = "Pond connection lost. Retrying; browser drafts are kept.";
     await new Promise((resolve) => setTimeout(resolve, RETRY_MS));
   }
@@ -1217,9 +1147,9 @@ if (!store(STATE_KEY)?.navOpen?.[own.id]) {
 }
 for (const ctx of state.contexts) if (ctx.running) watch(ctx);
 
-renderNav(); // the config knows the home folder, which shortens paths
+renderNav();
 
-const webmcp = registerWebMcp(agentUi());
+const webmcp = registerWebMcp({ ...agentUi(), forCurrentWorkspace: () => agentUi(workspace()) });
 $("#webmcp-status").textContent = webmcp.ok
   ? "Agents in this browser can use this page through WebMCP."
   : "WebMCP isn't available in this browser, so only MCP clients can reach the lake.";
@@ -1230,7 +1160,7 @@ if (route) open(route.ctx, route.view, route.parts, { history: false });
 else if (activeId !== false) activateTab(state.tabs.find((t) => t.id === activeId) ?? state.tabs[0], { history: false });
 else open(own, "home", [], { history: false });
 
-for (const ctx of state.contexts) if (ctx.running && ctx.nav.open.has("ctx")) refreshNav(ctx);
+if (workspace()?.running) refreshNav(workspace(), { refreshViews: false });
 
 // Contexts start and stop in other terminals; keep the navigator current.
 setInterval(async () => {

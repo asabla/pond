@@ -4,9 +4,45 @@ Reviewed on 5 November 2026, against commit `e27038b`.
 
 ## Implementation status
 
-The fixes below are implemented on `codex/usability-and-runtimes`. The original
+The initial fixes below were merged and released in `v0.2.0`. Context removal
+followed in `v0.2.1`. The original
 review follows this section and describes the baseline commit, including its
 failures. Those observations are retained as the reason for each change.
+
+### Workspace layout follow-up
+
+The nine browser comments are addressed on `codex/workspace-layout`:
+
+| Comment | Change |
+| --- | --- |
+| 1 | Removed the visible Reopen control and close notification. Cmd/Ctrl-Shift-T still recovers closed drafts in the selected workspace. |
+| 2 | Shared agent setup in Overview and Settings offers Codex, Claude Code, Cursor, VS Code / Copilot, and a generic URL. Commands and JSON use the selected workspace's MCP address. |
+| 3 | Recent queries have short operation/table labels and separate result metadata. Expand an entry to inspect highlighted SQL or open it in another editor tab. |
+| 4 | Counts load automatically after the main page, in batches of at most 40 tables. Cached counts expire after 30 seconds and are invalidated by foreground SQL. Background statements stay out of normal query history. |
+| 5–6 | Removed the global command palette and extra context row. Workspace, path, theme and Activity share one header. |
+| 7 | The sidebar can be collapsed on desktop. Its state survives reload. Narrow navigation retains its drawer, inert content and Escape focus handling. |
+| 8 | A searchable workspace picker follows the Pond brand. Only that workspace's navigation and tabs are visible. Each workspace retains its tabs, drafts and last selected tab. Stopped entries can be removed in the picker. |
+| 9 | Healthy connections have no status text. Connection failures and stopped workspaces still have an explicit notice. |
+
+Browser tools bind the selected workspace once per call. A workspace change
+during an asynchronous check or confirmation cannot redirect the later write.
+External MCP connections retain their registered server target.
+
+Verification used two isolated example lakes on MiniLake 1.9.1 with Docker
+29.2.1 through Colima. Built-in Browser checks covered automatic counts,
+workspace search and arrow/Enter selection, separate SQL drafts across workspace
+changes and reload, closed-tab recovery, expanded SQL, all five harness choices,
+Settings setup, desktop collapse, a 320-pixel layout, mobile drawer focus, and
+removal of the stopped sample from the picker. Clicking Run returns focus to
+the button after completion. The user's running lake was not changed.
+
+The 63 JavaScript tests, Deno check/lint, Go web race tests and build passed.
+Tests include history label parsing, client configuration, count invalidation,
+and workspace binding across asynchronous browser-tool steps. Screenshot evidence
+is retained locally in `dist/workspace-layout/evidence/` (untracked). These checks
+do not establish screen-reader certification, large-lake count performance, or
+live compatibility with the external agent clients. Client formats follow the
+[official setup examples](https://developers.openai.com/learn/docs-mcp).
 
 | Findings | Implemented change |
 | --- | --- |

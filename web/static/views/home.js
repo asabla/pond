@@ -4,6 +4,9 @@
 import { h, button, snippet, empty, errorBox, loading, fmtTime, fmtDuration, guard, shellQuote } from "../dom.js";
 import { listGraphs } from "../graph.js";
 import { runStatus } from "./jobs.js";
+import { connectAgent } from "../mcp-connect.js";
+import { queryTitle } from "../overview-model.js";
+import { highlight } from "../editor.js";
 
 const MAX_COUNTED = 40;
 
@@ -11,6 +14,8 @@ export function createHomeView(ui) {
   const { lake } = ui;
   const el = h("section", { class: "view home-view", "aria-label": "Overview" });
   let token = 0;
+  const counts = new Map();
+  const COUNT_TTL = 30000;
 
   el.addEventListener("dragover", (e) => {
     if ([...e.dataTransfer.types].includes("Files")) {
@@ -32,8 +37,7 @@ export function createHomeView(ui) {
     const ctx = ui.ctx;
     return h("header", { class: "home-head", style: `--ctx: var(--series-${(ctx?.slot ?? 0) + 1})` },
       h("div", { class: "home-title" },
-        h("h1", {}, ctx?.name ?? "Lake"),
-        h("p", { class: "home-dir" }, ctx?.dir ?? ""),
+        h("h1", {}, "Overview"),
         status),
       ctx?.running !== false && !ctx?.offline && h("div", { class: "actions" },
         button("Import file", guard(() => ui.importFile?.())),
@@ -54,7 +58,7 @@ export function createHomeView(ui) {
           ui.context?.container ? snippet(`pond logs ${shellQuote(ui.ctx?.dir)}`) : null,
           h("p", { class: "muted" }, h("span", { class: "loading" }), ` Retrying · ${ui.state.offline.error}`)));
     }
-    page(head(h("p", { class: "home-status ok" }, "Running")), loading());
+    page(head(null), loading());
     try {
       const [tables, history, queries, graphs, runs] = await Promise.all([
         allTables(),
@@ -65,7 +69,7 @@ export function createHomeView(ui) {
       ]);
       if (t !== token) return;
       render({ tables, history, queries, graphs, runs });
-
+      countRows(tables, t);
     } catch (err) {
       if (t === token) page(head(null), errorBox(err.message));
     }
@@ -81,43 +85,61 @@ export function createHomeView(ui) {
     return out;
   }
 
-  // Row counts come in after the page shows, in one statement for up to MAX_COUNTED tables.
+  // Show the workspace immediately, then fetch uncached counts in bounded batches.
   async function countRows(tables, t) {
-    const counted = tables.slice(0, MAX_COUNTED);
-    if (!counted.length) return;
-    const sql = counted.map((tb, i) => `SELECT ${i} AS i, count(*) AS n FROM ${lake.quoteName(tb.full_name)}`).join("\nUNION ALL\n");
-    const res = await lake.runSql(`/* pond:system */ ${sql}`).catch(() => null);
-    if (t !== token || !res) return;
-    for (const [i, n] of res.rows) {
-      const cell = el.querySelector(`[data-rows="${i}"]`);
-      if (cell) cell.textContent = `${Number(n).toLocaleString()} rows`;
+    const pending = tables.map((tb, index) => ({ tb, index })).filter(({ tb }) => {
+      const entry = counts.get(tb.full_name);
+      return !entry || Date.now() - entry.at > COUNT_TTL || entry.updated !== tb.updated_at || entry.version !== lake.dataVersion;
+    });
+    for (let start = 0; start < pending.length && t === token; start += MAX_COUNTED) {
+      const batch = pending.slice(start, start + MAX_COUNTED);
+      const version = lake.dataVersion;
+      const sql = batch.map(({ tb, index }) => `SELECT ${index} AS i, count(*) AS n FROM ${lake.quoteName(tb.full_name)}`).join("\nUNION ALL\n");
+      try {
+        const result = await lake.runSql(`/* pond:system */ ${sql}`);
+        for (const [index, count] of result.rows) {
+          const tb = tables[Number(index)];
+          if (!tb) continue;
+          const at = Date.now();
+          counts.set(tb.full_name, { count, at, updated: tb.updated_at, version });
+          if (t !== token) continue;
+          const cell = el.querySelector(`[data-rows="${index}"]`);
+          if (cell) { cell.textContent = `${Number(count).toLocaleString()} rows`; cell.title = `Counted ${fmtTime(at)}`; }
+        }
+      } catch (error) {
+        if (t !== token) return;
+        for (const { index } of batch) {
+          const cell = el.querySelector(`[data-rows="${index}"]`);
+          if (cell) { cell.textContent = "Unavailable"; cell.title = error.message; }
+        }
+      }
     }
   }
 
   function render({ tables, history, queries, graphs, runs }) {
-    const ctx = ui.ctx;
     const tableList = tables.length
       ? h("ul", { class: "home-list tables" }, tables.map((tb, i) => h("li", {},
         h("a", { href: `#/data/${tb.full_name}` },
-          h("span", { class: "ns" }, `${tb.catalog_name}.${tb.schema_name}.`), h("b", {}, tb.name)),
-        h("span", { class: "meta", "data-rows": String(i) }, "Not counted"),
+          h("b", {}, tb.name), h("span", { class: "ns" }, `${tb.catalog_name}.${tb.schema_name}`)),
+        h("span", { class: "meta", "data-rows": String(i), title: counts.has(tb.full_name) ? `Counted ${fmtTime(counts.get(tb.full_name).at)}` : "Counting in the background" }, counts.has(tb.full_name) ? `${Number(counts.get(tb.full_name).count).toLocaleString()} rows` : "Counting…"),
         h("span", { class: "meta" }, `${tb.columns?.length ?? 0} columns`))))
       : h("div", { class: "home-empty" },
         h("p", {}, "This lake has no tables yet. Drop a CSV, JSON or Parquet file here, or create one with SQL."),
         h("p", { class: "muted" }, "To fill a context the same way every time, put .sql or .py files in ", h("code", {}, "pond-seed/"), ". They run when the lake is new."));
 
     const recent = history.length
-      ? h("ul", { class: "home-list history" }, history.map((e) => h("li", {},
-        h("button", { class: "linkish mono", title: e.query_text, onclick: () => ui.views.query.open(e.query_text) },
-          h("span", { class: `dot ${e.status === "FINISHED" ? "ok" : "err"}` }), e.query_text.replace(/\s+/g, " ")),
-        h("span", { class: "meta" }, [e.rows_produced != null && `${e.rows_produced} rows`, fmtDuration(e.duration), fmtTime(e.query_start_time_ms)].filter(Boolean).join(" · ")))))
+      ? h("div", { class: "recent-queries" }, history.map((e) => h("details", { class: "recent-query" },
+        h("summary", {}, h("span", { class: "recent-query-title" }, queryTitle(e.query_text)),
+          h("span", { class: "recent-query-meta" }, [e.status === "FINISHED" ? "Succeeded" : e.status || "Unknown", e.rows_produced != null && `${e.rows_produced} ${Number(e.rows_produced) === 1 ? "row" : "rows"}`, fmtDuration(e.duration), fmtTime(e.query_start_time_ms)].filter(Boolean).join(" · "))),
+        h("pre", { class: "recent-query-sql", tabindex: "0", "aria-label": "Query SQL" }, highlight(e.query_text, "sql")),
+        button("Open in editor", () => ui.views.query.open(e.query_text), "ghost"))))
       : empty("Nothing run yet.");
 
     page(
-      head(h("p", { class: "home-status ok" }, "Running")),
+      head(null),
       h("div", { class: "home-grid" },
         h("div", { class: "home-main" },
-          h("section", { class: "home-section" }, h("h2", {}, "Tables ", h("span", { class: "count" }, String(tables.length))), tables.length > 0 && button("Count rows", guard(() => countRows(tables, token))), tableList),
+          h("section", { class: "home-section" }, h("h2", {}, "Tables ", h("span", { class: "count" }, String(tables.length))), tableList),
           h("section", { class: "home-section" }, h("h2", {}, "Recent queries"), recent)),
         h("aside", { class: "home-side" },
           h("section", { class: "home-section" }, h("h2", {}, "Saved"),
@@ -133,9 +155,7 @@ export function createHomeView(ui) {
                 h("span", { class: `status-badge ${st.tone}` }, st.label));
             }))),
           ui.mcpUrl && h("section", { class: "home-section" }, h("h2", {}, "Connect an agent"),
-            h("p", { class: "help" }, "Register this context's MCP server with Claude Code, or any MCP client:"),
-            snippet(`claude mcp add --transport http pond-${ctx?.name ?? "lake"} ${ui.mcpUrl}`),
-            h("p", { class: "help muted" }, "Agents in this browser can also use the page itself through WebMCP. You'll see what they do under Activity.")))),
+            connectAgent(ui)))),
     );
   }
 
@@ -143,6 +163,7 @@ export function createHomeView(ui) {
     el,
     show,
     activate: () => show(),
+    treeChanged: () => { counts.clear(); if (!el.hidden) show(); },
     snapshot: () => ({ overview: ui.ctx?.name }),
   };
 }

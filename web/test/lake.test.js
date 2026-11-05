@@ -27,6 +27,17 @@ test("query history separates background statements without deleting them", asyn
   assert.equal((await lake.queryHistory(3, { includeBackground: true })).length, 3);
 });
 
+test("foreground SQL invalidates cached counts while background counts do not", async () => {
+  const client = lake.createLake();
+  routes["GET /pond/config"] = () => [200, { warehouse_id: "w" }];
+  routes["POST /api/2.0/sql/statements"] = () => [200, { status: { state: "SUCCEEDED" } }];
+  const initial = client.dataVersion;
+  await client.runSql("/* pond:system */ SELECT count(*) FROM a.b.c");
+  assert.equal(client.dataVersion, initial);
+  await client.runSql("INSERT INTO a.b.c VALUES (1)");
+  assert.ok(client.dataVersion > initial);
+});
+
 test("first import creates its namespace and retries without overwriting a staged file", async () => {
   const catalogs = [], schemas = [], volumes = [];
   const client = lake.createLake();

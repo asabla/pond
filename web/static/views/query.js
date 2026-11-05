@@ -83,6 +83,7 @@ export function createQueryView(ui) {
     const sql = editor.value.trim();
     if (byAgent && state.running) throw new Error("Another query is still running in the editor.");
     if (!sql || state.running) return state.last;
+    const restoreFocus = document.activeElement === runBtn;
     state.running = true;
     status.textContent = "Query running.";
     runBtn.disabled = true;
@@ -98,6 +99,7 @@ export function createQueryView(ui) {
       state.running = false;
       runBtn.disabled = Boolean(ui.state.offline);
       if (runBtn.disabled) runBtn.dataset.offlineDisabled = "true";
+      if (restoreFocus && runBtn.isConnected && !runBtn.disabled && document.activeElement === document.body) runBtn.focus({ preventScroll: true });
     }
     status.textContent = state.last.error ? `Query failed: ${state.last.error}` : `Query completed. ${state.last.result.rows.length} rows fetched.`;
     renderResults();

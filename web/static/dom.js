@@ -163,9 +163,9 @@ export function download(name, data, type = "application/octet-stream") {
 
 export const shellQuote = (value) => "'" + String(value).replaceAll("'", "'\"'\"'") + "'";
 
-export function snippet(text) {
+export function snippet(text, label = "Copy command") {
   const btn = h("button", {
-    "aria-label": `Copy command: ${text}`,
+    "aria-label": `${label}: ${text}`,
     onclick: async () => {
       await navigator.clipboard.writeText(text);
       btn.textContent = "Copied";

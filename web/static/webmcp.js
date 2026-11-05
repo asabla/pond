@@ -561,12 +561,16 @@ function wrap(tool, ui) {
   return {
     ...tool,
     execute: async (input = {}, client) => {
+      // Bind one workspace for the entire call, including confirmation waits.
+      // A switch during an in-flight call must not redirect later writes.
+      const target = ui.forCurrentWorkspace?.() ?? ui;
+      const selected = target === ui ? tool : buildTools(target).find((t) => t.name === tool.name);
       try {
-        const result = await tool.execute(input, client);
-        ui.logAgent(tool.name, input);
+        const result = await selected.execute(input, client);
+        target.logAgent(tool.name, input);
         return text(result);
       } catch (err) {
-        ui.logAgent(tool.name, input, err.message);
+        target.logAgent(tool.name, input, err.message);
         return fail(err.message);
       }
     },

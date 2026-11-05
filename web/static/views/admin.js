@@ -1,6 +1,7 @@
 // @ts-check
 // Settings: the context, connecting agents, warehouses, secrets, and resetting the lake.
 import { h, table, action, button, formDialog, confirmDialog, toast, loading, errorBox, empty, snippet, fmtTime, shellQuote } from "../dom.js";
+import { connectAgent } from "../mcp-connect.js";
 
 export function createAdminView(ui) {
   const { lake } = ui;
@@ -64,8 +65,7 @@ export function createAdminView(ui) {
         h("p", { class: "help" }, "Drafts, closed-tab recovery and open tabs stay in this browser at this address. Saved objects and query/run history live in the lake. Page activity clears on reload. Export query and graph definitions or scripts to keep them in project files.")),
 
       ui.mcpUrl && section("Connect an agent", null,
-        h("p", { class: "help" }, "Each context has its own MCP server. Register it under the context's name in Claude Code, Claude Desktop, Codex or another MCP client."),
-        snippet(`claude mcp add --transport http pond-${ctx?.name ?? "lake"} ${ui.mcpUrl}`)),
+        connectAgent(ui)),
 
       section("SQL warehouses", button("New warehouse", newWarehouse),
         table(warehouses, [

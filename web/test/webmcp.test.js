@@ -136,6 +136,24 @@ test("without navigator.modelContext, tools stay on window.pond.tools", () => {
   assert.equal(Object.keys(window.pond.tools).length, tools.length);
 });
 
+test("browser tools bind the selected workspace once for the whole call", async () => {
+  const first = fakeUi(), second = fakeUi();
+  let selected = first;
+  const writes = [];
+  first.lake = { ...lake, fileExists: async () => { selected = second; return false; }, uploadFile: async () => writes.push("first") };
+  second.lake = { ...lake, fileExists: async () => false, uploadFile: async () => writes.push("second") };
+  globalThis.window = {};
+  Object.defineProperty(globalThis.navigator, "modelContext", { value: undefined, configurable: true });
+  registerWebMcp({ ...first, forCurrentWorkspace: () => selected });
+  await window.pond.tools.write_file.execute({ path: "/sample.txt", content: "sample" });
+  assert.deepEqual(writes, ["first"]);
+  assert.equal(first.log[0].name, "write_file");
+  assert.equal(second.log.length, 0);
+  await window.pond.tools.write_file.execute({ path: "/sample.txt", content: "sample" });
+  assert.deepEqual(writes, ["first", "second"]);
+  assert.equal(second.log[0].name, "write_file");
+});
+
 test("the README's WebMCP table lists exactly these tools", () => {
   const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
   const section = readme.split("### WebMCP")[1].split("\n## ")[0];
